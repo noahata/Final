@@ -15,7 +15,7 @@ const requiredEnv = [
 console.log("Checking environment variables...");
 requiredEnv.forEach(varName => {
   if (!process.env[varName]) {
-    console.error(`Missing required environment variable: ${varName}`);
+    console.error("Missing required environment variable: " + varName);
     process.exit(1);
   }
 });
@@ -64,25 +64,21 @@ function checkRateLimit(userId) {
 
 function isValidYouTubeUrl(url) {
   if (!url) return false;
-  const patterns = [
-    /youtube\.com\/channel\//i,
-    /youtube\.com\/c\//i,
-    /youtube\.com\/user\//i,
-    /youtu\.be\//i,
-    /youtube\.com\/@/i
-  ];
-  return patterns.some(pattern => pattern.test(url));
+  return url.includes('youtube.com/channel/') || 
+         url.includes('youtube.com/c/') || 
+         url.includes('youtube.com/user/') || 
+         url.includes('youtu.be/') || 
+         url.includes('youtube.com/@');
 }
 
 function isValidEmail(email) {
   if (email.toLowerCase() === 'skip') return true;
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
+  return email.includes('@') && email.includes('.');
 }
 
 function isValidPhone(phone) {
-  const phoneRegex = /^(\+251|0)?9\d{8}$/;
-  return phoneRegex.test(phone.replace(/\s/g, ''));
+  const cleanPhone = phone.replace(/\s/g, '');
+  return cleanPhone.match(/^(\+251|0)?9\d{8}$/) !== null;
 }
 
 function getFee(user) {
@@ -110,12 +106,6 @@ function cleanupInactiveSessions() {
 
 setInterval(cleanupInactiveSessions, 15 * 60 * 1000);
 
-async function sendWithTyping(chatId, text, options = {}) {
-  await bot.sendChatAction(chatId, 'typing');
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  return bot.sendMessage(chatId, text, options);
-}
-
 // ================= START =================
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
@@ -131,14 +121,11 @@ bot.onText(/\/start/, async (msg) => {
     lastActivity: Date.now()
   };
 
-  await sendWithTyping(chatId,
-`*Welcome to OTS Teacher Registration System*
-
-This is your professional platform to register as a verified teacher.
-
-Please choose an option below to begin:`,
+  await bot.sendMessage(chatId,
+"Welcome to OTS Teacher Registration System\n\n" +
+"This is your professional platform to register as a verified teacher.\n\n" +
+"Please choose an option below to begin:",
 {
-    parse_mode: "Markdown",
     reply_markup: {
       keyboard: [
         ["Register"],
@@ -162,10 +149,7 @@ bot.on("message", async (msg) => {
   // ADMIN REPLY MODE
   if (msg.from.id === ADMIN_ID && adminReplyTarget) {
     await bot.sendMessage(adminReplyTarget,
-`*Message from OTS Administration*
-
-${text}`,
-{ parse_mode: "Markdown" });
+"Message from OTS Administration\n\n" + text);
 
     await bot.sendMessage(ADMIN_ID, "Reply delivered successfully.");
     adminReplyTarget = null;
@@ -187,12 +171,10 @@ ${text}`,
     user.status = "collecting";
     user.createdAt = Date.now();
 
-    return sendWithTyping(chatId,
-`*Step 1/5 - Full Name*
-
-Please enter your full legal name as it appears on your ID.`,
+    return bot.sendMessage(chatId,
+"Step 1/5 - Full Name\n\n" +
+"Please enter your full legal name as it appears on your ID.",
 {
-      parse_mode: "Markdown",
       reply_markup: { 
         keyboard: [["Back", "Cancel"]], 
         resize_keyboard: true 
@@ -242,12 +224,10 @@ Please enter your full legal name as it appears on your ID.`,
     user.name = text.trim();
     user.step = "phone";
     
-    return sendWithTyping(chatId,
-`*Step 2/5 - Phone Number*
-
-Please share your phone number using the secure button below:`,
+    return bot.sendMessage(chatId,
+"Step 2/5 - Phone Number\n\n" +
+"Please share your phone number using the button below:",
 {
-      parse_mode: "Markdown",
       reply_markup: {
         keyboard: [
           [{ text: "Share Phone Number", request_contact: true }],
@@ -280,15 +260,12 @@ Please share your phone number using the secure button below:`,
     user.phone = phoneNumber;
     user.step = "youtube";
 
-    return sendWithTyping(chatId,
-`*Step 3/5 - YouTube Channel (Required)*
-
-Please enter your YouTube channel link. 
-Example: https://youtube.com/c/yourchannel or https://youtube.com/@yourchannel
-
-This step is *mandatory* for registration.`,
+    return bot.sendMessage(chatId,
+"Step 3/5 - YouTube Channel (Required)\n\n" +
+"Please enter your YouTube channel link.\n" +
+"Example: https://youtube.com/c/yourchannel or https://youtube.com/@yourchannel\n\n" +
+"This step is mandatory for registration.",
 {
-      parse_mode: "Markdown",
       reply_markup: { 
         keyboard: [["Back", "Cancel"]], 
         resize_keyboard: true 
@@ -300,33 +277,27 @@ This step is *mandatory* for registration.`,
   if (user.step === "youtube") {
     if (!text || text.toLowerCase() === "skip") {
       return bot.sendMessage(chatId,
-"*YouTube channel is required for registration.*
-
-Please provide a valid YouTube channel URL:",
-{ parse_mode: "Markdown" });
+"YouTube channel is required for registration.\n\n" +
+"Please provide a valid YouTube channel URL:");
     }
 
     if (!isValidYouTubeUrl(text)) {
       return bot.sendMessage(chatId,
-"Please enter a valid YouTube channel URL.
-
-Examples:
-- https://youtube.com/c/yourchannel
-- https://youtube.com/@yourchannel
-- https://youtu.be/yourchannel");
+"Please enter a valid YouTube channel URL.\n\n" +
+"Examples:\n" +
+"- https://youtube.com/c/yourchannel\n" +
+"- https://youtube.com/@yourchannel\n" +
+"- https://youtu.be/yourchannel");
     }
 
     user.youtube = text.trim();
     user.step = "email";
 
-    return sendWithTyping(chatId,
-`*Step 4/5 - Email Address*
-
-Enter your email address, or type 'Skip' to continue without email.
-
-Example: name@example.com`,
+    return bot.sendMessage(chatId,
+"Step 4/5 - Email Address\n\n" +
+"Enter your email address, or type 'Skip' to continue without email.\n\n" +
+"Example: name@example.com",
 {
-      parse_mode: "Markdown",
       reply_markup: { 
         keyboard: [["Back", "Cancel"]], 
         resize_keyboard: true 
@@ -349,20 +320,18 @@ Example: name@example.com`,
     
     user.step = "subject";
 
-    return sendWithTyping(chatId,
-`*Step 5/5 - Teaching Subject*
-
-What subject(s) do you teach? (e.g., Mathematics, Physics, English)
-
-Please be specific.`,
+    return bot.sendMessage(chatId,
+"Step 5/5 - Teaching Subject\n\n" +
+"What subject(s) do you teach? (e.g., Mathematics, Physics, English)\n\n" +
+"Please be specific.",
 {
-      parse_mode: "Markdown",
       reply_markup: { 
         keyboard: [["Back", "Cancel"]], 
         resize_keyboard: true 
       }
     });
-}  // SUBJECT STEP
+}
+    // SUBJECT STEP
   if (user.step === "subject") {
     if (!text || text.length < 2) {
       return bot.sendMessage(chatId, 
@@ -373,6 +342,7 @@ Please be specific.`,
     user.step = "completed";
     user.status = "pending_review";
 
+    // Send info to DB channel
     (async () => {
       let channelName = "Unknown";
       let channelLink = "No link";
@@ -388,93 +358,79 @@ Please be specific.`,
       }
 
       await bot.sendMessage(DB_CHANNEL,
-`*New Teacher Registration Pending Review*
-
-Name: ${user.name}
-Phone: ${user.phone}
-Subject: ${user.subject}
-YouTube: ${user.youtube}
-Email: ${user.email}
-Registered: ${new Date().toLocaleString()}
-
-Channel Info:
-- Name: ${channelName}
-- Link: ${channelLink}
-- Subscribers: ${subscribers}
-
-Payment: Pending
-Status: Pending Review`,
+"New Teacher Registration Pending Review\n\n" +
+"Name: " + user.name + "\n" +
+"Phone: " + user.phone + "\n" +
+"Subject: " + user.subject + "\n" +
+"YouTube: " + user.youtube + "\n" +
+"Email: " + user.email + "\n" +
+"Registered: " + new Date().toLocaleString() + "\n\n" +
+"Channel Info:\n" +
+"- Name: " + channelName + "\n" +
+"- Link: " + channelLink + "\n" +
+"- Subscribers: " + subscribers + "\n\n" +
+"Payment: Pending\n" +
+"Status: Pending Review",
 {
-        parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [
-              { text: "Reply", callback_data: `reply_${chatId}` },
-              { text: "Approve", callback_data: `approve_${chatId}` },
-              { text: "Reject", callback_data: `reject_${chatId}` }
+              { text: "Reply", callback_data: "reply_" + chatId },
+              { text: "Approve", callback_data: "approve_" + chatId },
+              { text: "Reject", callback_data: "reject_" + chatId }
             ]
           ]
         }
       });
 
       await bot.sendMessage(chatId,
-`*Registration Submitted Successfully!*
-
-Your registration is now under admin review.
-
-Next Steps:
-1. Admin will review your information (usually within 24 hours)
-2. If approved, you'll receive a secure payment link
-3. Complete payment to activate your profile
-
-Commission: You earn 55% of all app profits from students you refer
-
-Note: Registration fee may increase if payment is delayed beyond 24 hours.`,
-{ parse_mode: "Markdown" });
+"Registration Submitted Successfully!\n\n" +
+"Your registration is now under admin review.\n\n" +
+"Next Steps:\n" +
+"1. Admin will review your information (usually within 24 hours)\n" +
+"2. If approved, you'll receive a secure payment link\n" +
+"3. Complete payment to activate your profile\n\n" +
+"Commission: You earn 55% of all app profits from students you refer\n\n" +
+"Note: Registration fee may increase if payment is delayed beyond 24 hours.");
     })();
   }
 
   // STATUS BUTTON
   if (text === "My Status") {
-    let statusMessage = `*Your Current Registration Status*\n\n`;
+    let statusMessage = "Your Current Registration Status\n\n";
     
     if (!user.status || user.status === "idle") {
       statusMessage += "You haven't started registration yet. Use /start to begin.";
     } else {
-      statusMessage += `Status: *${user.status.replace(/_/g, ' ').toUpperCase()}*\n`;
+      statusMessage += "Status: " + user.status.toUpperCase() + "\n";
       
       if (user.status === "pending_review") {
         statusMessage += "\nYour application is being reviewed by admin.";
       } else if (user.status === "approved") {
         const fee = getFee(user);
-        statusMessage += `\nApproved! Payment required: *${fee} ETB*`;
+        statusMessage += "\nApproved! Payment required: " + fee + " ETB";
       } else if (user.status === "reapply_required") {
         statusMessage += "\nYour application was not approved. Please reapply.";
       } else if (user.status === "payment_verified") {
-        statusMessage += `\nPayment verified! Commission rate: 55%`;
+        statusMessage += "\nPayment verified! Commission rate: 55%";
       }
     }
     
-    return bot.sendMessage(chatId, statusMessage, { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, statusMessage);
   }
 
   if (text === "About Platform") {
     return bot.sendMessage(chatId,
-`*About OTS Platform*
-
-OTS (Online Teaching System) connects qualified teachers with students securely across Ethiopia.
-
-Features:
-- Secure payment processing via Chapa
-- 55% commission rate for teachers
-- Direct student-teacher connection
-- Admin-verified teachers only
-- 24/7 support
-
-Registration Fee: 99 ETB (Standard) / 149 ETB (After 24h)
-
-For more information, contact @OTSSupport`,
-{ parse_mode: "Markdown" });
+"About OTS Platform\n\n" +
+"OTS (Online Teaching System) connects qualified teachers with students securely across Ethiopia.\n\n" +
+"Features:\n" +
+"- Secure payment processing via Chapa\n" +
+"- 55% commission rate for teachers\n" +
+"- Direct student-teacher connection\n" +
+"- Admin-verified teachers only\n" +
+"- 24/7 support\n\n" +
+"Registration Fee: 99 ETB (Standard) / 149 ETB (After 24h)\n\n" +
+"For more information, contact @OTSSupport");
   }
 });
 
@@ -497,7 +453,7 @@ bot.on("callback_query", async (query) => {
     }
 
     const amount = getFee(user);
-    const tx_ref = `tx-${Date.now()}-${userId}`;
+    const tx_ref = "tx-" + Date.now() + "-" + userId;
     
     user.tx_ref = tx_ref;
     
@@ -508,11 +464,11 @@ bot.on("callback_query", async (query) => {
       first_name: user.name.split(' ')[0],
       last_name: user.name.split(' ').slice(1).join(' ') || "Teacher",
       tx_ref: tx_ref,
-      callback_url: `${WEBHOOK_URL}/verify`,
-      return_url: `${WEBHOOK_URL}/success`,
+      callback_url: WEBHOOK_URL + "/verify",
+      return_url: WEBHOOK_URL + "/success",
       customization: {
         title: "OTS Teacher Registration",
-        description: `Registration fee for ${user.name}`
+        description: "Registration fee for " + user.name
       }
     };
 
@@ -520,26 +476,19 @@ bot.on("callback_query", async (query) => {
       const response = await axios.post(
         "https://api.chapa.co/v1/transaction/initialize",
         paymentData,
-        { headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` } }
+        { headers: { Authorization: "Bearer " + process.env.CHAPA_SECRET_KEY } }
       );
 
       if (response.data.status === "success") {
         const paymentLink = response.data.data.checkout_url;
         
         await bot.sendMessage(userId,
-`*Complete Your Payment*
-
-Click the link below to pay *${amount} ETB* securely via Chapa:
-
-${paymentLink}
-
-*After Payment:*
-Your account will be automatically activated once payment is confirmed.
-
-Payment window: 24 hours`,
-{
-  parse_mode: "Markdown"
-});
+"Complete Your Payment\n\n" +
+"Click the link below to pay " + amount + " ETB securely via Chapa:\n\n" +
+paymentLink + "\n\n" +
+"After Payment:\n" +
+"Your account will be automatically activated once payment is confirmed.\n\n" +
+"Payment window: 24 hours");
 
         await bot.answerCallbackQuery(query.id, { text: "Payment link generated" });
       } else {
@@ -576,11 +525,10 @@ Payment window: 24 hours`,
       targetUser.status = "approved";
       
       await bot.editMessageText(
-        query.message.text + "\n\n*APPROVED*",
+        query.message.text + "\n\nAPPROVED",
         {
           chat_id: chatId,
           message_id: messageId,
-          parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [] }
         }
       );
@@ -588,15 +536,11 @@ Payment window: 24 hours`,
       await bot.answerCallbackQuery(query.id, { text: "Teacher approved" });
 
       await bot.sendMessage(targetId,
-`*Congratulations! Your registration is approved!*
-
-*Registration Fee: ${fee} ETB*
-
-Click the button below to pay securely via Chapa.
-
-Note: Payment must be completed within 24 hours to avoid penalty fees.`,
+"Congratulations! Your registration is approved!\n\n" +
+"Registration Fee: " + fee + " ETB\n\n" +
+"Click the button below to pay securely via Chapa.\n\n" +
+"Note: Payment must be completed within 24 hours to avoid penalty fees.",
 {
-        parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [{ text: "Pay Now", callback_data: "pay_now" }]
@@ -609,11 +553,10 @@ Note: Payment must be completed within 24 hours to avoid penalty fees.`,
       targetUser.status = "reapply_required";
       
       await bot.editMessageText(
-        query.message.text + "\n\n*REJECTED*",
+        query.message.text + "\n\nREJECTED",
         {
           chat_id: chatId,
           message_id: messageId,
-          parse_mode: "Markdown",
           reply_markup: { inline_keyboard: [] }
         }
       );
@@ -621,17 +564,13 @@ Note: Payment must be completed within 24 hours to avoid penalty fees.`,
       await bot.answerCallbackQuery(query.id, { text: "Teacher rejected" });
 
       await bot.sendMessage(targetId,
-`*Registration Not Approved*
-
-Unfortunately, your registration was not approved at this time.
-
-You may reapply with updated information using /start.
-
-Common reasons for rejection:
-- Invalid YouTube channel
-- Incomplete information
-- Unable to verify identity`,
-{ parse_mode: "Markdown" });
+"Registration Not Approved\n\n" +
+"Unfortunately, your registration was not approved at this time.\n\n" +
+"You may reapply with updated information using /start.\n\n" +
+"Common reasons for rejection:\n" +
+"- Invalid YouTube channel\n" +
+"- Incomplete information\n" +
+"- Unable to verify identity");
     }
   } else {
     await bot.answerCallbackQuery(query.id, { text: "Unauthorized", show_alert: true });
@@ -652,8 +591,8 @@ app.post("/verify", async (req, res) => {
     }
 
     const verify = await axios.get(
-      `https://api.chapa.co/v1/transaction/verify/${tx_ref}`,
-      { headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` } }
+      "https://api.chapa.co/v1/transaction/verify/" + tx_ref,
+      { headers: { Authorization: "Bearer " + process.env.CHAPA_SECRET_KEY } }
     );
 
     const data = verify.data.data;
@@ -677,27 +616,19 @@ app.post("/verify", async (req, res) => {
     user.paymentDate = new Date().toISOString();
 
     await bot.sendMessage(telegramId,
-`*Payment Verified Successfully!*
-
-Thank you for your payment of *${data.amount} ETB*.
-
-Your teacher profile is now *active*!
-
-*Commission Rate:* 55% of all app profits
-*Next Steps:* Start sharing your referral link with students
-
-Need help? Contact @OTSSupport`,
-{ parse_mode: "Markdown" });
+"Payment Verified Successfully!\n\n" +
+"Thank you for your payment of " + data.amount + " ETB.\n\n" +
+"Your teacher profile is now active!\n\n" +
+"Commission Rate: 55% of all app profits\n" +
+"Next Steps: Start sharing your referral link with students\n\n" +
+"Need help? Contact @OTSSupport");
 
     await bot.sendMessage(ADMIN_ID,
-`*Payment Received*
-
-Teacher: ${user.name}
-Amount: ${data.amount} ETB
-Transaction: ${tx_ref}
-
-Status: Payment verified`,
-{ parse_mode: "Markdown" });
+"Payment Received\n\n" +
+"Teacher: " + user.name + "\n" +
+"Amount: " + data.amount + " ETB\n" +
+"Transaction: " + tx_ref + "\n\n" +
+"Status: Payment verified");
 
     res.status(200).json({ status: "success" });
   } catch (err) {
@@ -714,18 +645,16 @@ app.get("/success", (req, res) => {
         <title>Payment Successful</title>
         <style>
           body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
-          .container { background: white; padding: 40px; border-radius: 10px; max-width: 500px; margin: 0 auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .container { background: white; padding: 40px; border-radius: 10px; max-width: 500px; margin: 0 auto; }
           h1 { color: #4CAF50; }
-          .checkmark { font-size: 80px; margin-bottom: 20px; }
           .btn { background: #0088cc; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
         </style>
       </head>
       <body>
         <div class="container">
-          <div class="checkmark">✅</div>
           <h1>Payment Successful!</h1>
           <p>Your registration payment has been processed successfully.</p>
-          <p>You can now close this window and return to Telegram to continue.</p>
+          <p>You can now close this window and return to Telegram.</p>
           <a href="https://t.me/OTSSupport" class="btn">Contact Support</a>
         </div>
       </body>
@@ -756,8 +685,8 @@ bot.on("polling_error", (error) => {
 // ================= SERVER =================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Bot is running`);
-  console.log(`Monitoring ${Object.keys(users).length} users`);
-  console.log(`Webhook URL: ${WEBHOOK_URL}/verify`);
+  console.log("Server running on port " + PORT);
+  console.log("Bot is running");
+  console.log("Monitoring " + Object.keys(users).length + " users");
+  console.log("Webhook URL: " + WEBHOOK_URL + "/verify");
 });
