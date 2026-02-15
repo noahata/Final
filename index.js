@@ -628,7 +628,7 @@ Click the button below to pay securely via Chapa.
       await bot.answerCallbackQuery(query.id, { text: "❌ Teacher rejected" });
 
       await bot.sendMessage(targetId,
-"❌ *Registration Not Approved*
+*Registration Not Approved*
 
 Unfortunately, your registration was not approved at this time.
 
