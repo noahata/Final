@@ -344,7 +344,7 @@ bot.on("message", async (msg) => {
         resize_keyboard: true 
       }
     });
-  }  // SUBJECT STEP
+        }  // SUBJECT STEP
   if (user.step === "subject") {
     if (!text || text.length < 2) {
       return bot.sendMessage(chatId, 
@@ -455,40 +455,41 @@ bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
 
-  // Handle payment callback
-  if (query.data === "pay_now") {
-    const userId = query.from.id;
-    const user = users[userId];
+  // Handle payment - Generate payment link when admin approves
+  if (query.data.startsWith("approve_")) {
+    const targetId = Number(query.data.split("_")[1]);
+    const targetUser = users[targetId];
     
-    if (!user || user.status !== "approved") {
-      await bot.answerCallbackQuery(query.id, { 
-        text: "❌ Invalid payment request or registration not approved", 
-        show_alert: true 
-      });
+    if (!targetUser) {
+      await bot.answerCallbackQuery(query.id, { text: "❌ User not found", show_alert: true });
       return;
     }
 
-    const amount = getFee(user);
-    const tx_ref = "tx-" + Date.now() + "-" + userId;
+    const fee = getFee(targetUser);
+    targetUser.status = "approved";
     
-    user.tx_ref = tx_ref;
+    // Generate transaction reference
+    const tx_ref = "tx-" + Date.now() + "-" + targetId;
+    targetUser.tx_ref = tx_ref;
     
+    // Create Chapa payment link
     const paymentData = {
-      amount: amount,
+      amount: fee,
       currency: "ETB",
-      email: user.email !== "Not provided" ? user.email : "customer@example.com",
-      first_name: user.name.split(' ')[0],
-      last_name: user.name.split(' ').slice(1).join(' ') || "Teacher",
+      email: targetUser.email !== "Not provided" ? targetUser.email : "customer@example.com",
+      first_name: targetUser.name.split(' ')[0],
+      last_name: targetUser.name.split(' ').slice(1).join(' ') || "Teacher",
       tx_ref: tx_ref,
       callback_url: WEBHOOK_URL + "/verify",
       return_url: WEBHOOK_URL + "/success",
       customization: {
         title: "OTS Teacher Registration",
-        description: "Registration fee for " + user.name
+        description: "Registration fee for " + targetUser.name
       }
     };
 
     try {
+      // Create payment link via Chapa API
       const response = await axios.post(
         "https://api.chapa.co/v1/transaction/initialize",
         paymentData,
@@ -498,32 +499,65 @@ bot.on("callback_query", async (query) => {
       if (response.data.status === "success") {
         const paymentLink = response.data.data.checkout_url;
         
-        await bot.sendMessage(userId,
-"🔗 *Complete Your Payment*\n\n" +
-"💳 Click the link below to pay *" + amount + " ETB* securely via Chapa:\n\n" +
-"🔗 " + paymentLink + "\n\n" +
-"✅ *After Payment:*\n" +
-"Your account will be automatically activated once payment is confirmed.\n\n" +
-"⏱️ *Payment window:* 24 hours",
-{ parse_mode: "Markdown" });
+        // Edit the admin message
+        await bot.editMessageText(
+          query.message.text + "\n\n✅ *APPROVED*",
+          {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [] }
+          }
+        );
 
-        await bot.answerCallbackQuery(query.id, { text: "✅ Payment link generated" });
+        await bot.answerCallbackQuery(query.id, { text: "✅ Teacher approved" });
+
+        // Send approval message with payment link as TEXT, not button
+        await bot.sendMessage(targetId,
+"🎉 *Congratulations! Your registration is approved!*\n\n" +
+"💳 *Registration Fee: " + fee + " ETB*\n\n" +
+"🔗 Click the link below to pay securely via Chapa:\n\n" +
+paymentLink + "\n\n" +
+"📋 *Instructions:*\n" +
+"1️⃣ Click the link above\n" +
+"2️⃣ Complete payment on Chapa website\n" +
+"3️⃣ Return to Telegram - your account will auto-activate\n\n" +
+"⏱️ *Note:* Payment must be completed within 24 hours to avoid penalty fees.\n\n" +
+"❓ Need help? Contact @OTSSupport",
+{ parse_mode: "Markdown" });
       } else {
         throw new Error("Failed to create payment link");
       }
     } catch (error) {
       console.error("Chapa API error:", error.message);
-      await bot.sendMessage(userId,
-"❌ Sorry, there was an error generating the payment link. Please try again later or contact support.");
-      await bot.answerCallbackQuery(query.id, { text: "❌ Payment failed", show_alert: true });
+      await bot.sendMessage(targetId,
+"❌ Sorry, there was an error generating the payment link. Please contact admin @OTSSupport");
+      await bot.answerCallbackQuery(query.id, { text: "❌ Payment link failed", show_alert: true });
     }
     return;
   }
 
-  // Admin callbacks
-  if (query.from.id === ADMIN_ID) {
-    const data = query.data;
-    const targetId = Number(data.split("_")[1]);
+  // Reply callback
+  if (query.data.startsWith("reply_")) {
+    if (query.from.id !== ADMIN_ID) {
+      await bot.answerCallbackQuery(query.id, { text: "⛔ Unauthorized", show_alert: true });
+      return;
+    }
+    
+    const targetId = Number(query.data.split("_")[1]);
+    adminReplyTarget = targetId;
+    await bot.answerCallbackQuery(query.id, { text: "💬 Reply mode activated" });
+    return bot.sendMessage(ADMIN_ID, "✍️ Please type your reply message:");
+  }
+
+  // Reject callback
+  if (query.data.startsWith("reject_")) {
+    if (query.from.id !== ADMIN_ID) {
+      await bot.answerCallbackQuery(query.id, { text: "⛔ Unauthorized", show_alert: true });
+      return;
+    }
+    
+    const targetId = Number(query.data.split("_")[1]);
     const targetUser = users[targetId];
     
     if (!targetUser) {
@@ -531,59 +565,21 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    if (data.startsWith("reply_")) {
-      adminReplyTarget = targetId;
-      await bot.answerCallbackQuery(query.id, { text: "💬 Reply mode activated" });
-      return bot.sendMessage(ADMIN_ID, "✍️ Please type your reply message:");
-    }
-
-    if (data.startsWith("approve_")) {
-      const fee = getFee(targetUser);
-      targetUser.status = "approved";
-      
-      await bot.editMessageText(
-        query.message.text + "\n\n✅ *APPROVED*",
-        {
-          chat_id: chatId,
-          message_id: messageId,
-          parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [] }
-        }
-      );
-
-      await bot.answerCallbackQuery(query.id, { text: "✅ Teacher approved" });
-
-      await bot.sendMessage(targetId,
-"🎉 *Congratulations! Your registration is approved!*\n\n" +
-"💳 *Registration Fee: " + fee + " ETB*\n\n" +
-"👇 Click the button below to pay securely via Chapa.\n\n" +
-"⏱️ *Note:* Payment must be completed within 24 hours to avoid penalty fees.",
-{
+    targetUser.status = "reapply_required";
+    
+    await bot.editMessageText(
+      query.message.text + "\n\n❌ *REJECTED*",
+      {
+        chat_id: chatId,
+        message_id: messageId,
         parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "💳 Pay Now", callback_data: "pay_now" }]
-          ]
-        }
-      });
-    }
+        reply_markup: { inline_keyboard: [] }
+      }
+    );
 
-    if (data.startsWith("reject_")) {
-      targetUser.status = "reapply_required";
-      
-      await bot.editMessageText(
-        query.message.text + "\n\n❌ *REJECTED*",
-        {
-          chat_id: chatId,
-          message_id: messageId,
-          parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [] }
-        }
-      );
+    await bot.answerCallbackQuery(query.id, { text: "❌ Teacher rejected" });
 
-      await bot.answerCallbackQuery(query.id, { text: "❌ Teacher rejected" });
-
-      await bot.sendMessage(targetId,
+    await bot.sendMessage(targetId,
 "❌ *Registration Not Approved*\n\n" +
 "Unfortunately, your registration was not approved at this time.\n\n" +
 "🔄 You may reapply with updated information using /start.\n\n" +
@@ -592,9 +588,6 @@ bot.on("callback_query", async (query) => {
 "• Incomplete information\n" +
 "• Unable to verify identity",
 { parse_mode: "Markdown" });
-    }
-  } else {
-    await bot.answerCallbackQuery(query.id, { text: "⛔ Unauthorized", show_alert: true });
   }
 });
 
