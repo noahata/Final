@@ -82,12 +82,19 @@ function isValidPhone(phone) {
 }
 
 function getFee(user) {
-  if (!user || !user.createdAt) return PRICING.STANDARD;
+  console.log("💰 Calculating fee for:", user?.name);
+  
+  if (!user || !user.createdAt) {
+    return PRICING.STANDARD;
+  }
+  
   const hours = (Date.now() - user.createdAt) / (1000 * 60 * 60);
+  
   if (user.status === "reapply_required" || hours > 24) {
     user.penalty = true;
     return PRICING.PENALTY;
   }
+  
   user.penalty = false;
   return PRICING.STANDARD;
 }
@@ -344,7 +351,7 @@ bot.on("message", async (msg) => {
         resize_keyboard: true 
       }
     });
-        }  // SUBJECT STEP
+}  // SUBJECT STEP
   if (user.step === "subject") {
     if (!text || text.length < 2) {
       return bot.sendMessage(chatId, 
@@ -402,7 +409,7 @@ bot.on("message", async (msg) => {
 "📋 Your registration is now under admin review.\n\n" +
 "📌 *Next Steps:*\n" +
 "1️⃣ Admin will review your information (usually within 24 hours)\n" +
-"2️⃣ If approved, you'll receive a secure payment link\n" +
+"2️⃣ If approved, you'll receive a secure Chapa payment link\n" +
 "3️⃣ Complete payment to activate your profile\n\n" +
 "💰 *Commission:* You earn 55% of all app profits from students you refer\n\n" +
 "⏱️ *Note:* Registration fee may increase if payment is delayed beyond 24 hours.",
@@ -450,58 +457,124 @@ bot.on("message", async (msg) => {
   }
 });
 
-// ================= ADMIN CALLBACKS =================
+// ================= ADMIN CALLBACKS - LIVE CHAPA ONLY =================
 bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
 
-  // Handle payment - Generate payment link when admin approves
+  // Handle approve - LIVE CHAPA ONLY (NO MANUAL FALLBACK)
   if (query.data.startsWith("approve_")) {
+    console.log("✅ Approve button clicked");
+    
+    // Only admin can approve
+    if (query.from.id !== ADMIN_ID) {
+      await bot.answerCallbackQuery(query.id, { text: "⛔ Unauthorized", show_alert: true });
+      return;
+    }
+    
     const targetId = Number(query.data.split("_")[1]);
     const targetUser = users[targetId];
     
     if (!targetUser) {
+      console.log("❌ User not found:", targetId);
       await bot.answerCallbackQuery(query.id, { text: "❌ User not found", show_alert: true });
       return;
     }
-
+    
+    console.log("👤 User found:", targetUser.name);
+    
+    // Calculate fee
     const fee = getFee(targetUser);
+    console.log("💰 Fee calculated:", fee, "ETB");
+    
+    // Verify fee is valid
+    if (typeof fee !== 'number' || isNaN(fee) || fee <= 0) {
+      console.log("❌ Invalid fee:", fee);
+      await bot.sendMessage(ADMIN_ID, "❌ Fee calculation failed for " + targetUser.name);
+      await bot.answerCallbackQuery(query.id, { text: "❌ Fee calculation failed", show_alert: true });
+      return;
+    }
+    
     targetUser.status = "approved";
     
     // Generate transaction reference
-    const tx_ref = "tx-" + Date.now() + "-" + targetId;
+    const tx_ref = "OTS-" + Date.now() + "-" + targetId;
     targetUser.tx_ref = tx_ref;
     
-    // Create Chapa payment link
+    // Prepare email (ensure it's valid for Chapa)
+    let email = targetUser.email;
+    if (email === "Not provided" || !email.includes('@')) {
+      email = "teacher_" + Date.now() + "@ots.com";
+    }
+    
+    // Prepare payment data for Chapa
     const paymentData = {
       amount: fee,
       currency: "ETB",
-      email: targetUser.email !== "Not provided" ? targetUser.email : "customer@example.com",
-      first_name: targetUser.name.split(' ')[0],
-      last_name: targetUser.name.split(' ').slice(1).join(' ') || "Teacher",
+      email: email,
+      first_name: targetUser.name.split(' ')[0] || "Teacher",
+      last_name: targetUser.name.split(' ').slice(1).join(' ') || "User",
       tx_ref: tx_ref,
       callback_url: WEBHOOK_URL + "/verify",
-      return_url: WEBHOOK_URL + "/success",
-      customization: {
-        title: "OTS Teacher Registration",
-        description: "Registration fee for " + targetUser.name
-      }
+      return_url: WEBHOOK_URL + "/success"
     };
-
+    
+    console.log("📤 Sending to Chapa with amount:", paymentData.amount, "ETB");
+    
+    // Update admin message to show processing
+    await bot.editMessageText(
+      query.message.text + "\n\n⏳ *GENERATING CHAPA PAYMENT LINK...*",
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [] }
+      }
+    );
+    
     try {
-      // Create payment link via Chapa API
+      // Send to Chapa API
       const response = await axios.post(
         "https://api.chapa.co/v1/transaction/initialize",
         paymentData,
-        { headers: { Authorization: "Bearer " + process.env.CHAPA_SECRET_KEY } }
+        { 
+          headers: { 
+            Authorization: "Bearer " + process.env.CHAPA_SECRET_KEY,
+            "Content-Type": "application/json"
+          } 
+        }
       );
-
-      if (response.data.status === "success") {
+      
+      console.log("📥 Chapa response:", response.data);
+      
+      if (response.data && response.data.status === "success") {
         const paymentLink = response.data.data.checkout_url;
         
-        // Edit the admin message
+        // Send success to teacher with Chapa payment link
+        await bot.sendMessage(targetId,
+"🎉 *Congratulations! Your registration is approved!*\n\n" +
+"💰 *Amount to Pay: " + fee + " ETB*\n\n" +
+"🔗 *Click this link to pay securely via Chapa:*\n" +
+paymentLink + "\n\n" +
+"📋 *Instructions:*\n" +
+"1️⃣ Click the link above\n" +
+"2️⃣ Complete payment on Chapa website\n" +
+"3️⃣ Return here - account will auto-activate within 1 minute\n\n" +
+"⏱️ *Payment window:* 24 hours\n\n" +
+"❓ Need help? Contact @OTSSupport",
+{ parse_mode: "Markdown" });
+        
+        // Notify admin
+        await bot.sendMessage(ADMIN_ID,
+"✅ *Chapa Payment Link Generated*\n\n" +
+"👤 Teacher: " + targetUser.name + "\n" +
+"💰 Amount: " + fee + " ETB\n" +
+"🔗 Link sent to teacher\n\n" +
+"⏳ Waiting for payment verification...");
+        
+        // Update admin message to show approved with link
         await bot.editMessageText(
-          query.message.text + "\n\n✅ *APPROVED*",
+          query.message.text + "\n\n✅ *APPROVED - CHAPA LINK SENT*",
           {
             chat_id: chatId,
             message_id: messageId,
@@ -509,31 +582,61 @@ bot.on("callback_query", async (query) => {
             reply_markup: { inline_keyboard: [] }
           }
         );
-
-        await bot.answerCallbackQuery(query.id, { text: "✅ Teacher approved" });
-
-        // Send approval message with payment link as TEXT, not button
-        await bot.sendMessage(targetId,
-"🎉 *Congratulations! Your registration is approved!*\n\n" +
-"💳 *Registration Fee: " + fee + " ETB*\n\n" +
-"🔗 Click the link below to pay securely via Chapa:\n\n" +
-paymentLink + "\n\n" +
-"📋 *Instructions:*\n" +
-"1️⃣ Click the link above\n" +
-"2️⃣ Complete payment on Chapa website\n" +
-"3️⃣ Return to Telegram - your account will auto-activate\n\n" +
-"⏱️ *Note:* Payment must be completed within 24 hours to avoid penalty fees.\n\n" +
-"❓ Need help? Contact @OTSSupport",
-{ parse_mode: "Markdown" });
+        
+        await bot.answerCallbackQuery(query.id, { text: "✅ Chapa link sent - Amount: " + fee + " ETB" });
       } else {
-        throw new Error("Failed to create payment link");
+        // Chapa API returned error
+        console.log("❌ Chapa returned non-success:", response.data);
+        
+        await bot.sendMessage(ADMIN_ID,
+"❌ *Chapa API Error*\n\n" +
+"👤 Teacher: " + targetUser.name + "\n" +
+"💰 Amount: " + fee + " ETB\n" +
+"📊 Response: " + JSON.stringify(response.data) + "\n\n" +
+"⚠️ Please check Chapa dashboard and try again.");
+        
+        await bot.editMessageText(
+          query.message.text + "\n\n❌ *CHAPA ERROR - TRY AGAIN*",
+          {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: [] }
+          }
+        );
+        
+        await bot.answerCallbackQuery(query.id, { text: "❌ Chapa error - check logs", show_alert: true });
       }
+      
     } catch (error) {
-      console.error("Chapa API error:", error.message);
-      await bot.sendMessage(targetId,
-"❌ Sorry, there was an error generating the payment link. Please contact admin @OTSSupport");
-      await bot.answerCallbackQuery(query.id, { text: "❌ Payment link failed", show_alert: true });
+      // Chapa API connection error
+      console.error("❌ Chapa API connection error:", error.response?.data || error.message);
+      
+      const errorDetails = error.response?.data || { message: error.message };
+      
+      await bot.sendMessage(ADMIN_ID,
+"❌ *Chapa API Connection Failed*\n\n" +
+"👤 Teacher: " + targetUser.name + "\n" +
+"💰 Amount: " + fee + " ETB\n" +
+"📊 Error: " + JSON.stringify(errorDetails) + "\n\n" +
+"⚠️ Please check:\n" +
+"• Chapa API key is correct\n" +
+"• Webhook URL is set in Chapa dashboard\n" +
+"• Internet connection");
+      
+      await bot.editMessageText(
+        query.message.text + "\n\n❌ *CHAPA CONNECTION FAILED*",
+        {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [] }
+        }
+      );
+      
+      await bot.answerCallbackQuery(query.id, { text: "❌ Chapa connection failed", show_alert: true });
     }
+    
     return;
   }
 
@@ -564,7 +667,7 @@ paymentLink + "\n\n" +
       await bot.answerCallbackQuery(query.id, { text: "❌ User not found", show_alert: true });
       return;
     }
-
+    
     targetUser.status = "reapply_required";
     
     await bot.editMessageText(
@@ -576,9 +679,9 @@ paymentLink + "\n\n" +
         reply_markup: { inline_keyboard: [] }
       }
     );
-
+    
     await bot.answerCallbackQuery(query.id, { text: "❌ Teacher rejected" });
-
+    
     await bot.sendMessage(targetId,
 "❌ *Registration Not Approved*\n\n" +
 "Unfortunately, your registration was not approved at this time.\n\n" +
@@ -588,83 +691,108 @@ paymentLink + "\n\n" +
 "• Incomplete information\n" +
 "• Unable to verify identity",
 { parse_mode: "Markdown" });
+    
+    return;
   }
 });
 
-// ================= CHAPA WEBHOOK =================
+// ================= CHAPA WEBHOOK - LIVE VERIFICATION =================
 app.post("/verify", async (req, res) => {
   try {
+    console.log("🔔 Chapa webhook received:", req.body);
+    
     const { tx_ref } = req.body;
     
     if (!tx_ref) {
-      return res.status(400).json({ error: "Missing tx_ref" });
+      console.log("❌ No tx_ref in webhook");
+      return res.status(200).json({ error: "Missing tx_ref" });
     }
-
+    
+    // Check if already processed
     if (processedTransactions.has(tx_ref)) {
+      console.log("⏭️ Transaction already processed:", tx_ref);
       return res.status(200).json({ status: "already_processed" });
     }
-
+    
+    // Verify with Chapa API to confirm payment
+    console.log("🔍 Verifying with Chapa API:", tx_ref);
+    
     const verify = await axios.get(
       "https://api.chapa.co/v1/transaction/verify/" + tx_ref,
       { headers: { Authorization: "Bearer " + process.env.CHAPA_SECRET_KEY } }
     );
-
+    
+    console.log("📊 Chapa verification result:", verify.data);
+    
     const data = verify.data.data;
     
-    if (data.status !== "success") {
-      return res.status(200).json({ status: "payment_not_successful" });
-    }
-
-    const telegramId = Number(tx_ref.split("-").pop());
-    const user = users[telegramId];
-    
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    processedTransactions.add(tx_ref);
-
-    user.status = "payment_verified";
-    user.paidAmount = data.amount;
-    user.commission = data.amount * TEACHER_PERCENT;
-    user.paymentDate = new Date().toISOString();
-
-    await bot.sendMessage(telegramId,
+    // Check if payment was successful
+    if (data && data.status === "success") {
+      // Extract user ID from tx_ref (format: OTS-timestamp-userId)
+      const telegramId = Number(tx_ref.split("-").pop());
+      const user = users[telegramId];
+      
+      if (user) {
+        // Mark as processed
+        processedTransactions.add(tx_ref);
+        
+        // Update user status
+        user.status = "payment_verified";
+        user.paidAmount = data.amount;
+        user.commission = data.amount * TEACHER_PERCENT;
+        user.paymentDate = new Date().toISOString();
+        
+        console.log("✅ Payment verified for user:", user.name);
+        
+        // Notify user
+        await bot.sendMessage(telegramId,
 "✅ *Payment Verified Successfully!*\n\n" +
-"💰 Thank you for your payment of *" + data.amount + " ETB*.\n\n" +
+"💰 Amount: *" + data.amount + " ETB*\n\n" +
 "🎉 Your teacher profile is now *active*!\n\n" +
-"💵 *Commission Rate:* 55% of all app profits\n" +
-"📌 *Next Steps:* Start sharing your referral link with students\n\n" +
+"💵 *Commission Rate:* 55%\n" +
+"📌 Start sharing your referral link with students!\n\n" +
 "🆘 Need help? Contact @OTSSupport",
 { parse_mode: "Markdown" });
-
-    await bot.sendMessage(ADMIN_ID,
-"💰 *Payment Received*\n\n" +
+        
+        // Notify admin
+        await bot.sendMessage(ADMIN_ID,
+"💰 *Chapa Payment Received*\n\n" +
 "👤 Teacher: " + user.name + "\n" +
 "💵 Amount: " + data.amount + " ETB\n" +
 "🆔 Transaction: " + tx_ref + "\n\n" +
-"✅ Status: Payment verified",
+"✅ Status: Payment verified - Account activated",
 { parse_mode: "Markdown" });
-
-    res.status(200).json({ status: "success" });
+      } else {
+        console.log("❌ User not found for tx_ref:", tx_ref);
+      }
+    } else {
+      console.log("⚠️ Payment not successful yet:", data?.status);
+    }
+    
+    // Always return 200 to acknowledge receipt
+    res.status(200).json({ status: "received" });
+    
   } catch (err) {
-    console.error("Webhook error:", err.message);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("❌ Webhook error:", err.message);
+    // Always return 200 to prevent Chapa from retrying
+    res.status(200).json({ error: "Internal error but acknowledged" });
   }
 });
 
-// Success redirect endpoint
+// ================= SUCCESS PAGE =================
 app.get("/success", (req, res) => {
   res.send(`
     <html>
       <head>
         <title>Payment Successful - OTS</title>
         <style>
-          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
-          .container { background: white; padding: 40px; border-radius: 10px; max-width: 500px; margin: 0 auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-          h1 { color: #4CAF50; }
-          .checkmark { font-size: 80px; margin-bottom: 20px; }
-          .btn { background: #0088cc; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
+          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+          .container { background: white; padding: 40px; border-radius: 15px; max-width: 500px; margin: 0 auto; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+          h1 { color: #4CAF50; font-size: 32px; }
+          .checkmark { font-size: 80px; margin: 20px 0; color: #4CAF50; }
+          .btn { background: #0088cc; color: white; padding: 15px 40px; text-decoration: none; border-radius: 50px; display: inline-block; margin-top: 30px; font-weight: bold; font-size: 18px; }
+          .btn:hover { background: #006699; }
+          .note { color: #666; margin-top: 20px; font-size: 14px; }
         </style>
       </head>
       <body>
@@ -672,27 +800,45 @@ app.get("/success", (req, res) => {
           <div class="checkmark">✅</div>
           <h1>Payment Successful!</h1>
           <p>Your registration payment has been processed successfully.</p>
-          <p>You can now close this window and return to Telegram to continue.</p>
-          <a href="https://t.me/OTSSupport" class="btn">Contact Support</a>
+          <p>You can now close this window and return to Telegram.</p>
+          <a href="https://t.me/OTSSupport" class="btn">Return to Telegram</a>
+          <p class="note">Your account will be activated within 1 minute</p>
         </div>
       </body>
     </html>
   `);
 });
 
-// Health check endpoint
+// ================= HEALTH CHECK =================
 app.get("/health", (req, res) => {
   res.json({ 
     status: "healthy", 
     timestamp: new Date().toISOString(),
     users: Object.keys(users).length,
-    processedTransactions: processedTransactions.size
+    transactions: processedTransactions.size,
+    chapa_key: process.env.CHAPA_SECRET_KEY ? "✅ Set" : "❌ Missing",
+    webhook_url: WEBHOOK_URL + "/verify"
   });
+});
+
+// ================= TEST ENDPOINT =================
+app.get("/test", (req, res) => {
+  res.send(`
+    <html>
+      <body style="font-family: Arial; padding: 40px;">
+        <h1>✅ OTS Teacher Bot is Running!</h1>
+        <p>Webhook URL: <code>${WEBHOOK_URL}/verify</code></p>
+        <p>Status: <strong style="color: green;">LIVE</strong></p>
+        <p>Chapa: <strong style="color: green;">Active</strong></p>
+        <p>Users: ${Object.keys(users).length}</p>
+      </body>
+    </html>
+  `);
 });
 
 // Root endpoint
 app.get("/", (req, res) => {
-  res.send("🤖 OTS Teacher Bot is running!");
+  res.send("🤖 OTS Teacher Bot is running with LIVE Chapa! Use /test to check status.");
 });
 
 // ================= ERROR HANDLER =================
@@ -704,7 +850,9 @@ bot.on("polling_error", (error) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("✅ Server running on port " + PORT);
-  console.log("🤖 Bot is running");
+  console.log("🤖 Bot is running with LIVE Chapa");
   console.log("📊 Monitoring " + Object.keys(users).length + " users");
   console.log("🌐 Webhook URL: " + WEBHOOK_URL + "/verify");
+  console.log("🔗 Test URL: " + WEBHOOK_URL + "/test");
+  console.log("💰 Pricing: Standard 99 ETB | Penalty 149 ETB");
 });
