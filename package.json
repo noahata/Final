@@ -1,7 +1,7 @@
 {
   "name": "youtube-telegram-bot",
   "version": "1.0.0",
-  "description": "YouTube to Telegram Bot",
+  "description": "Monitor YouTube Shorts and post to Telegram",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
