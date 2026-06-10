@@ -241,3 +241,344 @@ async function makeVideoPublic(videoId, videoTitle) {
         return false;
     }
                 }
+// ============ MONITOR FUNCTIONS ============
+async function monitorForUser(userId, user) {
+    if (!user.targetChannelId || !user.yourChannelId) return;
+    
+    // Check if user has copies left
+    const copiesUsed = user.copiesUsed || 0;
+    if (copiesUsed >= MAX_COPIES_PER_PASSWORD) {
+        console.log(`User ${userId}: No copies left (${copiesUsed}/${MAX_COPIES_PER_PASSWORD})`);
+        return;
+    }
+    
+    try {
+        const channelRes = await youtube.channels.list({
+            part: 'contentDetails',
+            id: user.targetChannelId
+        });
+        if (!channelRes.data.items || channelRes.data.items.length === 0) return;
+        
+        const playlistId = channelRes.data.items[0].contentDetails.relatedPlaylists.uploads;
+        const playlistRes = await youtube.playlistItems.list({
+            part: 'snippet',
+            playlistId: playlistId,
+            maxResults: 1
+        });
+        if (!playlistRes.data.items || playlistRes.data.items.length === 0) return;
+        
+        const latest = playlistRes.data.items[0];
+        const videoId = latest.snippet.resourceId.videoId;
+        const publishedAt = latest.snippet.publishedAt;
+        
+        const videoRes = await youtube.videos.list({
+            part: 'contentDetails',
+            id: videoId
+        });
+        
+        const duration = videoRes.data.items[0].contentDetails.duration;
+        const match = duration.match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
+        const minutes = parseInt(match?.[1]) || 0;
+        const seconds = parseInt(match?.[2]) || 0;
+        const totalSeconds = minutes * 60 + seconds;
+        const isShort = totalSeconds <= 60;
+        
+        if (videoId !== user.lastVideoId && isShort) {
+            user.lastVideoId = videoId;
+            console.log(`\n🎬 ${user.targetUsername} posted at: ${publishedAt}`);
+            
+            const yourVideos = await getYourScheduledShorts(user.yourChannelId);
+            if (yourVideos.length === 0) {
+                console.log(`User ${userId}: No scheduled shorts`);
+                return;
+            }
+            
+            const nextVideo = yourVideos[0];
+            const copiesLeft = MAX_COPIES_PER_PASSWORD - (copiesUsed + 1);
+            
+            console.log(`📤 Publishing: "${nextVideo.title}" (Copy ${copiesUsed + 1}/${MAX_COPIES_PER_PASSWORD})`);
+            
+            await bot.telegram.sendMessage(
+                parseInt(userId),
+                `🎬 ${user.targetUsername} posted a Short!\n⏰ Time: ${publishedAt}\n\n` +
+                `📤 Publishing: "${nextVideo.title}"\n` +
+                `📊 Copies used: ${copiesUsed + 1}/${MAX_COPIES_PER_PASSWORD}\n` +
+                `📦 Copies left: ${copiesLeft}`
+            );
+            
+            const success = await makeVideoPublic(nextVideo.id, nextVideo.title);
+            
+            if (success) {
+                user.copiesUsed = (user.copiesUsed || 0) + 1;
+                await saveAllUserData();
+                
+                if (user.copiesUsed >= MAX_COPIES_PER_PASSWORD) {
+                    await bot.telegram.sendMessage(
+                        parseInt(userId),
+                        `⚠️ *Password Expired!*\n\n` +
+                        `You have used all ${MAX_COPIES_PER_PASSWORD} copies.\n` +
+                        `Contact ${CONTACT_USERNAME} to purchase a new password.`,
+                        { parse_mode: 'Markdown' }
+                    );
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Monitor error:', error.message);
+    }
+}
+
+async function monitorAllUsers() {
+    for (const [userId, user] of Object.entries(userData)) {
+        await monitorForUser(userId, user);
+    }
+}
+
+// ============ TELEGRAM BOT COMMANDS ============
+async function initBot() {
+    bot = new Telegraf(BOT_TOKEN);
+    
+    bot.use((ctx, next) => {
+        ctx.session = ctx.session || {};
+        return next();
+    });
+    
+    // /register - Master shows unused, customers register
+    bot.command('register', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        const args = ctx.message.text.split(' ');
+        const password = args[1];
+        
+        if (!password) {
+            return ctx.reply(
+                `🔐 *Register*\n\n` +
+                `Send: /register <password>\n` +
+                `Example: /register 13869972\n\n` +
+                `Contact ${CONTACT_USERNAME} to purchase.\n\n` +
+                `Each password gives you ${MAX_COPIES_PER_PASSWORD} Short copies.`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+        
+        // MASTER PASSWORD - Show unused passwords for sale
+        if (password === MASTER_PASSWORD) {
+            const info = getUnusedPasswords();
+            const unusedPasswords = info.unusedList;
+            
+            let message = `🔓 *UNUSED PASSWORDS FOR SALE*\n\n`;
+            message += `📊 Total available: ${info.unused}\n`;
+            message += `🔐 Already sold: ${info.used}\n`;
+            message += `📦 Each password: ${MAX_COPIES_PER_PASSWORD} Short copies\n`;
+            message += `💵 Contact ${CONTACT_USERNAME} to buy\n\n`;
+            message += `📋 *Available passwords (first 50):*\n\n`;
+            
+            let chunk = '';
+            let count = 0;
+            for (const pwd of unusedPasswords) {
+                chunk += `\`${pwd}\`  `;
+                count++;
+                if (count % 10 === 0) chunk += '\n';
+                if (count === 50) break;
+            }
+            
+            message += chunk;
+            if (info.unused > 50) {
+                message += `\n\n... and ${info.unused - 50} more available.`;
+            }
+            message += `\n\nTo sell: tell customer /register <password>`;
+            
+            return await ctx.reply(message, { parse_mode: 'Markdown' });
+        }
+        
+        // CUSTOMER PASSWORD - Register
+        const parsed = parsePassword(password);
+        if (!parsed) {
+            return ctx.reply(`❌ Invalid format! Password must be: \`1x8y9z7w\``, { parse_mode: 'Markdown' });
+        }
+        
+        const existingUser = Object.entries(userData).find(([uid, u]) => u.password === password);
+        if (existingUser && existingUser[0] !== userId) {
+            return ctx.reply(`❌ Password already registered! Contact ${CONTACT_USERNAME}.`);
+        }
+        
+        if (userData[userId] && userData[userId].password === password) {
+            return ctx.reply(`✅ Welcome back! You have ${MAX_COPIES_PER_PASSWORD - (userData[userId].copiesUsed || 0)} copies left.`);
+        }
+        
+        userData[userId] = {
+            password: password,
+            copiesUsed: 0,
+            registeredAt: new Date().toISOString()
+        };
+        
+        await saveAllUserData();
+        
+        await ctx.reply(
+            `✅ *Registration successful!*\n\n` +
+            `Password: \`${password}\`\n` +
+            `📦 Copies included: ${MAX_COPIES_PER_PASSWORD}\n\n` +
+            `Now set up:\n` +
+            `/setmyid - Set your YouTube channel ID\n` +
+            `/settarget @user - Set who to monitor\n` +
+            `/status - Check settings\n\n` +
+            `⚠️ OAuth is pre-configured! The bot can manage your YouTube channel automatically.`,
+            { parse_mode: 'Markdown' }
+        );
+    });
+    
+    // /setmyid - Set YouTube channel ID
+    bot.command('setmyid', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        if (!userData[userId]) return ctx.reply('❌ Register first: /register <password>');
+        await ctx.reply(`📤 Send your YouTube channel ID.\n\nGet it from @youtube_channel_id_bot`, { parse_mode: 'Markdown' });
+        ctx.session.waitingFor = 'yourChannelId';
+    });
+    
+    // /settarget - Set who to monitor
+    bot.command('settarget', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        if (!userData[userId]) return ctx.reply('❌ Register first');
+        await ctx.reply(`🎯 Send @username to monitor.\nExample: @Tewahdotube-21`, { parse_mode: 'Markdown' });
+        ctx.session.waitingFor = 'target';
+    });
+    
+    // /status - Show status
+    bot.command('status', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        const user = userData[userId];
+        if (!user) return ctx.reply('❌ Register first');
+        
+        const videos = user.yourChannelId ? await getYourScheduledShorts(user.yourChannelId) : [];
+        const copiesUsed = user.copiesUsed || 0;
+        const copiesLeft = MAX_COPIES_PER_PASSWORD - copiesUsed;
+        
+        await ctx.reply(
+            `📊 *Your Status*\n\n` +
+            `🔐 Password: \`${user.password}\`\n` +
+            `📦 Copies used: ${copiesUsed}/${MAX_COPIES_PER_PASSWORD}\n` +
+            `📦 Copies left: ${copiesLeft}\n` +
+            `📤 Your Channel ID: ${user.yourChannelId || '❌ Not set'}\n` +
+            `🎯 Target: ${user.targetUsername || '❌ Not set'}\n` +
+            `📦 Supply: ${videos.length} scheduled shorts\n` +
+            `🟢 Monitoring: ${user.targetChannelId && user.yourChannelId ? '✅ Active' : '❌ Incomplete'}\n\n` +
+            `🤖 OAuth: Auto-refresh enabled - no manual login needed!`,
+            { parse_mode: 'Markdown' }
+        );
+    });
+    
+    // /supply - Show scheduled shorts
+    bot.command('supply', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        const user = userData[userId];
+        if (!user) return ctx.reply('❌ Register first');
+        
+        if (!user.yourChannelId) {
+            return ctx.reply('❌ Set your channel ID first: /setmyid');
+        }
+        
+        const videos = await getYourScheduledShorts(user.yourChannelId);
+        if (videos.length === 0) {
+            await ctx.reply('📭 No scheduled shorts found.');
+        } else {
+            let msg = `📦 *Your Supply (${videos.length})*\n\n`;
+            videos.forEach((v, i) => {
+                msg += `${i+1}. ${v.title}\n   ⏰ ${new Date(v.scheduledTime).toLocaleString()}\n\n`;
+            });
+            await ctx.reply(msg, { parse_mode: 'Markdown' });
+        }
+    });
+    
+    // /copies - Check remaining copies
+    bot.command('copies', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        const user = userData[userId];
+        if (!user) return ctx.reply('❌ Register first');
+        
+        const copiesUsed = user.copiesUsed || 0;
+        const copiesLeft = MAX_COPIES_PER_PASSWORD - copiesUsed;
+        
+        await ctx.reply(
+            `📦 *Your Copies*\n\n` +
+            `Used: ${copiesUsed}/${MAX_COPIES_PER_PASSWORD}\n` +
+            `Left: ${copiesLeft}\n\n` +
+            `${copiesLeft === 0 ? '⚠️ Password expired! Contact @acespy to purchase a new one.' : '✅ Active'}`,
+            { parse_mode: 'Markdown' }
+        );
+    });
+    
+    // Handle text inputs
+    bot.on('text', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        const user = userData[userId];
+        if (!user) return;
+        
+        if (ctx.session.waitingFor === 'yourChannelId') {
+            user.yourChannelId = ctx.message.text.trim();
+            await saveAllUserData();
+            await ctx.reply(`✅ Your channel ID saved: ${user.yourChannelId}`);
+            ctx.session = {};
+        }
+        else if (ctx.session.waitingFor === 'target') {
+            user.targetUsername = ctx.message.text.trim();
+            await ctx.reply(`🔄 Converting...`);
+            user.targetChannelId = await usernameToChannelId(user.targetUsername);
+            if (user.targetChannelId) {
+                await saveAllUserData();
+                await ctx.reply(`✅ Monitoring: ${user.targetUsername}\n🆔 ID: ${user.targetChannelId}`);
+            } else {
+                await ctx.reply(`❌ Could not find: ${user.targetUsername}`);
+            }
+            ctx.session = {};
+        }
+    });
+    
+    // /help
+    bot.command('help', async (ctx) => {
+        const userId = ctx.from.id.toString();
+        const user = userData[userId];
+        
+        if (user) {
+            await ctx.reply(
+                `🤖 *Commands*\n\n` +
+                `/setmyid - Set your YouTube channel ID\n` +
+                `/settarget @user - Set who to monitor\n` +
+                `/status - Check settings and copies left\n` +
+                `/supply - View scheduled shorts\n` +
+                `/copies - Check remaining copies\n` +
+                `/help - This message\n\n` +
+                `📦 Each password gives ${MAX_COPIES_PER_PASSWORD} Short copies.`,
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            await ctx.reply(
+                `🤖 *YouTube Timing Bot*\n\n` +
+                `1. Contact ${CONTACT_USERNAME} to purchase a password\n` +
+                `2. Send /register <password>\n` +
+                `3. Set up with /setmyid and /settarget\n\n` +
+                `📦 Each password: ${MAX_COPIES_PER_PASSWORD} Short copies\n` +
+                `Password format: \`1x8y9z7w\`\n` +
+                `Example: \`13869972\``,
+                { parse_mode: 'Markdown' }
+            );
+        }
+    });
+    
+    bot.launch();
+    console.log('🤖 Bot started');
+}
+
+// ============ START ============
+async function start() {
+    console.log('🚀 Starting YouTube Timing Bot...');
+    console.log('🔐 OAuth2 with AUTO-REFRESH enabled!');
+    console.log(`📦 Max copies per password: ${MAX_COPIES_PER_PASSWORD}`);
+    console.log(`👑 Master Password: ${MASTER_PASSWORD}`);
+    await initBot();
+    await loadAllUserData();
+    console.log(`👥 Loaded ${Object.keys(userData).length} users`);
+    setInterval(monitorAllUsers, 60000);
+    console.log('🔍 Monitoring active...');
+    console.log('✅ Tokens auto-refresh - no manual intervention needed!');
+}
+
+start();
