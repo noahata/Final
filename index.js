@@ -213,8 +213,13 @@ async function makeVideoPublic(videoId, videoTitle) {
 // ============ MONITOR FUNCTIONS ============
 async function monitorForUser(userId, user) {
     if (!user.targetChannelId || !user.yourChannelId) return;
+    
+    // Check if user has copies left (MAX 10)
     const copiesUsed = user.copiesUsed || 0;
-    if (copiesUsed >= MAX_COPIES_PER_PASSWORD) return;
+    if (copiesUsed >= MAX_COPIES_PER_PASSWORD) {
+        console.log(`User ${userId}: No copies left (${copiesUsed}/${MAX_COPIES_PER_PASSWORD})`);
+        return;
+    }
     
     try {
         const channelRes = await youtube.channels.list({ part: 'contentDetails', id: user.targetChannelId });
@@ -226,8 +231,16 @@ async function monitorForUser(userId, user) {
         
         const latest = playlistRes.data.items[0];
         const videoId = latest.snippet.resourceId.videoId;
+        const publishedAt = latest.snippet.publishedAt;
         
-        if (videoId !== user.lastVideoId) {
+        const videoRes = await youtube.videos.list({ part: 'contentDetails', id: videoId });
+        const duration = videoRes.data.items[0].contentDetails.duration;
+        const match = duration.match(/PT(?:(\d+)M)?(?:(\d+)S)?/);
+        const minutes = parseInt(match?.[1]) || 0;
+        const seconds = parseInt(match?.[2]) || 0;
+        const isShort = (minutes * 60 + seconds) <= 60;
+        
+        if (videoId !== user.lastVideoId && isShort) {
             user.lastVideoId = videoId;
             const yourVideos = await getYourScheduledShorts(user.yourChannelId);
             if (yourVideos.length === 0) return;
@@ -237,10 +250,18 @@ async function monitorForUser(userId, user) {
             await saveAllUserData();
             await makeVideoPublic(nextVideo.id, nextVideo.title);
             
+            const copiesLeft = MAX_COPIES_PER_PASSWORD - user.copiesUsed;
             await bot.telegram.sendMessage(parseInt(userId), 
-                `🎬 *Target channel posted!*\n\n📤 Published: *${nextVideo.title}*\n📊 Copies left: ${MAX_COPIES_PER_PASSWORD - user.copiesUsed}/${MAX_COPIES_PER_PASSWORD}`,
+                `🎬 *Target channel posted!*\n\n📤 Published: *${nextVideo.title}*\n📊 Copies left: ${copiesLeft}/${MAX_COPIES_PER_PASSWORD}`,
                 { parse_mode: 'Markdown' }
             );
+            
+            if (user.copiesUsed >= MAX_COPIES_PER_PASSWORD) {
+                await bot.telegram.sendMessage(parseInt(userId),
+                    `⚠️ *Password expired!*\n\nYou've used all ${MAX_COPIES_PER_PASSWORD} copies.\nContact ${CONTACT_USERNAME} to purchase a new password.`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
         }
     } catch (error) {
         console.error('Monitor error:', error.message);
@@ -251,350 +272,4 @@ async function monitorAllUsers() {
     for (const [userId, user] of Object.entries(userData)) {
         await monitorForUser(userId, user);
     }
-}
-// ============ BOT COMMANDS WITH KEYBOARD ============
-async function initBot() {
-    bot = new Telegraf(BOT_TOKEN);
-    
-    // START command - Shows keyboard menu
-    bot.command('start', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        const user = userData[userId];
-        
-        if (user) {
-            const copiesLeft = MAX_COPIES_PER_PASSWORD - (user.copiesUsed || 0);
-            await ctx.reply(
-                `👋 *Welcome back!*\n\n` +
-                `🔐 Password: \`${user.password}\`\n` +
-                `📦 ${copiesLeft}/${MAX_COPIES_PER_PASSWORD} copies remaining\n\n` +
-                `👇 *Tap any button below*`,
-                { parse_mode: 'Markdown', ...mainKeyboard }
-            );
-        } else {
-            await ctx.reply(
-                `🎬 *YouTube Timing Bot*\n\n` +
-                `I help you publish your scheduled Shorts at the EXACT same time as any creator.\n\n` +
-                `✨ ${MAX_COPIES_PER_PASSWORD} timing copies per password\n\n` +
-                `👇 *Get started*`,
-                { parse_mode: 'Markdown', ...authKeyboard }
-            );
         }
-    });
-    
-    // ============ KEYBOARD BUTTON HANDLERS ============
-    
-    // MY STATUS button
-    bot.hears('📊 MY STATUS', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        const user = userData[userId];
-        
-        if (!user) {
-            await ctx.reply('❌ Not registered. Tap "🔐 I HAVE A PASSWORD" to start.', authKeyboard);
-            return;
-        }
-        
-        const copiesUsed = user.copiesUsed || 0;
-        const copiesLeft = MAX_COPIES_PER_PASSWORD - copiesUsed;
-        const videos = user.yourChannelId ? await getYourScheduledShorts(user.yourChannelId) : [];
-        
-        await ctx.reply(
-            `📊 *YOUR STATUS*\n\n` +
-            `🔐 Password: \`${user.password}\`\n` +
-            `📦 Copies: ${copiesUsed}/${MAX_COPIES_PER_PASSWORD} used\n` +
-            `📦 Left: ${copiesLeft} copies\n` +
-            `📤 Your Channel: ${user.yourChannelId ? '✅ Set' : '❌ Not set'}\n` +
-            `🎯 Target: ${user.targetChannelId ? '✅ Set' : '❌ Not set'}\n` +
-            `📹 Supply: ${videos.length} scheduled shorts\n` +
-            `🟢 Status: ${(user.targetChannelId && user.yourChannelId) ? '✅ ACTIVE' : '⚠️ Setup needed'}`,
-            { parse_mode: 'Markdown', ...mainKeyboard }
-        );
-    });
-    
-    // SET MY CHANNEL button
-    bot.hears('🎯 SET MY CHANNEL', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        const user = userData[userId];
-        
-        if (!user) {
-            await ctx.reply('❌ Register first. Tap "🔐 I HAVE A PASSWORD"', authKeyboard);
-            return;
-        }
-        
-        await ctx.reply(
-            `🎯 *Set Your YouTube Channel*\n\n` +
-            `Send me your channel @username or Channel ID:\n\n` +
-            `Examples:\n` +
-            `• \`/setmyid @MrBeast\`\n` +
-            `• \`/setmyid UCX6OQ3DkcsbYNE6H8uQQuVA\`\n\n` +
-            `I'll auto-convert @username for you! 🔄`,
-            { parse_mode: 'Markdown', ...mainKeyboard }
-        );
-        userSession[userId] = { step: 'awaiting_channel_id' };
-    });
-    
-    // SET TARGET button
-    bot.hears('👁️ SET TARGET', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        const user = userData[userId];
-        
-        if (!user) {
-            await ctx.reply('❌ Register first.', authKeyboard);
-            return;
-        }
-        
-        await ctx.reply(
-            `👁️ *Set Who to Monitor*\n\n` +
-            `Send me their channel @username or Channel ID:\n\n` +
-            `Examples:\n` +
-            `• \`/settarget @Tewahdotube-21\`\n` +
-            `• \`/settarget UC7_YxT-KID8kRbqZo7MyscQ\`\n\n` +
-            `I'll watch this channel and copy their timing! ⏰`,
-            { parse_mode: 'Markdown', ...mainKeyboard }
-        );
-        userSession[userId] = { step: 'awaiting_target_id' };
-    });
-    
-    // MY SUPPLY button
-    bot.hears('📦 MY SUPPLY', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        const user = userData[userId];
-        
-        if (!user) {
-            await ctx.reply('❌ Register first.', authKeyboard);
-            return;
-        }
-        
-        if (!user.yourChannelId) {
-            await ctx.reply('❌ Set your channel first using "🎯 SET MY CHANNEL" button', mainKeyboard);
-            return;
-        }
-        
-        const videos = await getYourScheduledShorts(user.yourChannelId);
-        if (videos.length === 0) {
-            await ctx.reply(
-                `📭 *No scheduled shorts found*\n\n` +
-                `Upload a Short to YouTube and choose "Schedule" instead of "Public".\n\n` +
-                `Then I'll publish them at the right time! 🚀`,
-                { parse_mode: 'Markdown', ...mainKeyboard }
-            );
-        } else {
-            let msg = `📦 *YOUR SUPPLY (${videos.length} shorts)*\n\n`;
-            videos.slice(0, 10).forEach((v, i) => {
-                msg += `${i+1}. ${v.title}\n   ⏰ ${new Date(v.scheduledTime).toLocaleString()}\n\n`;
-            });
-            await ctx.reply(msg, { parse_mode: 'Markdown', ...mainKeyboard });
-        }
-    });
-    
-    // COPIES LEFT button
-    bot.hears('🔢 COPIES LEFT', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        const user = userData[userId];
-        
-        if (!user) {
-            await ctx.reply('❌ Register first.', authKeyboard);
-            return;
-        }
-        
-        const copiesUsed = user.copiesUsed || 0;
-        const copiesLeft = MAX_COPIES_PER_PASSWORD - copiesUsed;
-        
-        let statusMsg = copiesLeft === 0 ? '⚠️ *EXPIRED* - Need new password' : '✅ *ACTIVE*';
-        
-        await ctx.reply(
-            `📦 *TIMING COPIES*\n\n` +
-            `🎯 Used: ${copiesUsed}/${MAX_COPIES_PER_PASSWORD}\n` +
-            `✨ Remaining: ${copiesLeft}\n` +
-            `🔐 Status: ${statusMsg}\n\n` +
-            `${copiesLeft === 0 ? `Contact ${CONTACT_USERNAME} to purchase more.` : 'Ready for the next Short!'}`,
-            { parse_mode: 'Markdown', ...mainKeyboard }
-        );
-    });
-    
-    // HELP button
-    bot.hears('❓ HELP', async (ctx) => {
-        await ctx.reply(
-            `🤖 *YouTube Timing Bot - Help*\n\n` +
-            `📋 *How it works:*\n` +
-            `1. Purchase a password from ${CONTACT_USERNAME}\n` +
-            `2. Tap "🔐 I HAVE A PASSWORD"\n` +
-            `3. Set your YouTube Channel\n` +
-            `4. Set who to monitor\n` +
-            `5. I'll automatically publish your scheduled Shorts at the exact same time!\n\n` +
-            `📦 Each password: ${MAX_COPIES_PER_PASSWORD} timing copies\n\n` +
-            `🔤 *Password format:* \`1x8y9z7w\` (Example: \`13869972\`)`,
-            { parse_mode: 'Markdown', ...mainKeyboard }
-        );
-    });
-    
-    // HOW TO GET CHANNEL ID button
-    bot.hears('❓ HOW TO GET CHANNEL ID', async (ctx) => {
-        await ctx.reply(
-            `🔍 *Find Any YouTube Channel ID*\n\n` +
-            `📱 *Method 1 (Easiest):*\n` +
-            `• Open Telegram\n` +
-            `• Search @youtube_channel_id_bot\n` +
-            `• Send @username or video link\n` +
-            `• Copy the UCxxxxxx ID\n\n` +
-            `💻 *Method 2:*\n` +
-            `• Go to YouTube Studio\n` +
-            `• Settings → Channel → Advanced\n` +
-            `• Copy your Channel ID\n\n` +
-            `🎯 *Method 3:*\n` +
-            `• Look at channel URL\n` +
-            `• youtube.com/channel/UCxxxxxx\n` +
-            `• Copy the UCxxxxxx part`,
-            { parse_mode: 'Markdown', ...mainKeyboard }
-        );
-    });
-    
-    // I HAVE A PASSWORD button
-    bot.hears('🔐 I HAVE A PASSWORD', async (ctx) => {
-        await ctx.reply(
-            `🔐 *Enter Your Password*\n\n` +
-            `Please send your 8-digit password:\n\n` +
-            `Example: \`13869972\`\n\n` +
-            `(Format: 1x8y9z7w where x,y,z,w are digits 0-9)`,
-            { parse_mode: 'Markdown' }
-        );
-        userSession[ctx.from.id.toString()] = { step: 'awaiting_password' };
-    });
-    
-    // LOGOUT button
-    bot.hears('🚪 LOGOUT', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        delete userData[userId];
-        await saveAllUserData();
-        await ctx.reply(
-            `🔴 *Logged out successfully*\n\n` +
-            `Your data has been cleared. Send /start to login again.`,
-            { parse_mode: 'Markdown', ...authKeyboard }
-        );
-    });
-    
-    // ============ TEXT HANDLERS ============
-    bot.on('text', async (ctx) => {
-        const userId = ctx.from.id.toString();
-        const text = ctx.message.text.trim();
-        const session = userSession[userId];
-        
-        // Handle password input
-        if (session && session.step === 'awaiting_password') {
-            const password = text;
-            
-            if (password === MASTER_PASSWORD) {
-                const info = getUnusedPasswords();
-                let msg = `🔓 *Available passwords: ${info.unused}*\n\n`;
-                info.unusedList.slice(0, 30).forEach(p => { msg += `\`${p}\` `; });
-                await ctx.reply(msg, { parse_mode: 'Markdown', ...mainKeyboard });
-                delete userSession[userId];
-                return;
-            }
-            
-            if (!parsePassword(password)) {
-                await ctx.reply(`❌ Invalid format! Password must be 8 digits.\nExample: \`13869972\``, { parse_mode: 'Markdown' });
-                return;
-            }
-            
-            if (userData[userId]) {
-                await ctx.reply(`✅ Already registered!`, mainKeyboard);
-                delete userSession[userId];
-                return;
-            }
-            
-            const existing = Object.values(userData).find(u => u.password === password);
-            if (existing) {
-                await ctx.reply(`❌ Password already used! Contact ${CONTACT_USERNAME}`, authKeyboard);
-                delete userSession[userId];
-                return;
-            }
-            
-            userData[userId] = {
-                password: password,
-                copiesUsed: 0,
-                registeredAt: new Date().toISOString(),
-                yourChannelId: '',
-                targetChannelId: ''
-            };
-            await saveAllUserData();
-            
-            await ctx.reply(
-                `🎉 *Registration successful!*\n\n` +
-                `🔐 Password: \`${password}\`\n` +
-                `📦 ${MAX_COPIES_PER_PASSWORD} timing copies\n\n` +
-                `Now tap "🎯 SET MY CHANNEL" to get started!`,
-                { parse_mode: 'Markdown', ...mainKeyboard }
-            );
-            delete userSession[userId];
-        }
-        
-        // Handle Channel ID input
-        else if (session && session.step === 'awaiting_channel_id') {
-            let channelId = text;
-            
-            if (text.startsWith('@')) {
-                await ctx.reply(`🔄 Converting @handle...`);
-                channelId = await convertHandleToChannelId(text);
-                if (!channelId) {
-                    await ctx.reply(`❌ Could not find: ${text}\n\nUse @youtube_channel_id_bot to get the ID.`, mainKeyboard);
-                    delete userSession[userId];
-                    return;
-                }
-                await ctx.reply(`✅ Found: \`${channelId}\``, { parse_mode: 'Markdown' });
-            }
-            
-            if (!channelId.startsWith('UC')) {
-                await ctx.reply(`❌ Invalid Channel ID! Must start with "UC"`, mainKeyboard);
-                delete userSession[userId];
-                return;
-            }
-            
-            userData[userId].yourChannelId = channelId;
-            await saveAllUserData();
-            await ctx.reply(`✅ Channel saved: \`${channelId}\`\n\nNow tap "👁️ SET TARGET" to choose who to monitor!`, { parse_mode: 'Markdown', ...mainKeyboard });
-            delete userSession[userId];
-        }
-        
-        // Handle Target ID input
-        else if (session && session.step === 'awaiting_target_id') {
-            let targetId = text;
-            
-            if (text.startsWith('@')) {
-                await ctx.reply(`🔄 Converting @handle...`);
-                targetId = await convertHandleToChannelId(text);
-                if (!targetId) {
-                    await ctx.reply(`❌ Could not find: ${text}\n\nUse @youtube_channel_id_bot to get the ID.`, mainKeyboard);
-                    delete userSession[userId];
-                    return;
-                }
-                await ctx.reply(`✅ Found: \`${targetId}\``, { parse_mode: 'Markdown' });
-            }
-            
-            if (!targetId.startsWith('UC')) {
-                await ctx.reply(`❌ Invalid Channel ID! Must start with "UC"`, mainKeyboard);
-                delete userSession[userId];
-                return;
-            }
-            
-            userData[userId].targetChannelId = targetId;
-            await saveAllUserData();
-            await ctx.reply(`✅ Now monitoring: \`${targetId}\`\n\nTap "📊 MY STATUS" to see everything is ready! 🚀`, { parse_mode: 'Markdown', ...mainKeyboard });
-            delete userSession[userId];
-        }
-    });
-    
-    bot.launch();
-    console.log('🤖 Bot started with keyboard menu!');
-}
-
-// ============ START ============
-async function start() {
-    console.log('🚀 Starting YouTube Timing Bot...');
-    await initBot();
-    await loadAllUserData();
-    console.log(`👥 Loaded ${Object.keys(userData).length} users`);
-    setInterval(monitorAllUsers, 60000);
-    console.log('🔍 Monitoring active...');
-}
-
-start();
