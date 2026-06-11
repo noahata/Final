@@ -13,7 +13,7 @@ const API_KEY = 'AIzaSyABemoPCHktvGsGZ1R99PrbA7FTQWuTDZg';
 const PORT = process.env.PORT || 3000;
 const app = express();
 app.get('/', (req, res) => res.send('Bot Running'));
-app.listen(PORT);
+app.listen(PORT, () => console.log(`🌐 Server on port ${PORT}`));
 
 // Setup OAuth for YOUR channel
 const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, 'https://developers.google.com/oauthplayground');
@@ -25,7 +25,86 @@ const youtube = google.youtube({ version: 'v3', auth: API_KEY });
 
 let lastVideoId = null;
 
-// Get YOUR scheduled shorts
+// ============ DEBUG: Check all videos ============
+async function debugAllVideos() {
+    console.log('\n🔍 === DEBUG START === 🔍');
+    
+    try {
+        // Test 1: Can we access your channel?
+        const channelCheck = await youtubeAuth.channels.list({
+            part: 'id',
+            id: YOUR_CHANNEL_ID
+        });
+        console.log(`✅ Channel access: ${channelCheck.data.items?.length > 0 ? 'SUCCESS' : 'FAILED'}`);
+        
+        // Test 2: Search for all videos
+        const searchRes = await youtubeAuth.search.list({
+            part: 'snippet',
+            channelId: YOUR_CHANNEL_ID,
+            type: 'video',
+            maxResults: 50
+        });
+        
+        const totalVideos = searchRes.data.items?.length || 0;
+        console.log(`📊 Total videos found: ${totalVideos}`);
+        
+        if (totalVideos === 0) {
+            console.log('❌ No videos found on your channel!');
+            console.log('   Make sure YOUR_CHANNEL_ID is correct.');
+            console.log(`   Current ID: ${YOUR_CHANNEL_ID}`);
+            return;
+        }
+        
+        // Test 3: Check each video's status
+        let scheduledCount = 0;
+        for (const item of searchRes.data.items) {
+            const videoRes = await youtubeAuth.videos.list({
+                part: 'status, snippet',
+                id: item.id.videoId
+            });
+            
+            const video = videoRes.data.items[0];
+            if (video) {
+                const status = video.status;
+                const isScheduled = (status.privacyStatus === 'private' && status.publishAt);
+                const isFuture = isScheduled ? new Date(status.publishAt) > new Date() : false;
+                
+                if (isScheduled && isFuture) {
+                    scheduledCount++;
+                    console.log(`\n✅ SCHEDULED VIDEO FOUND:`);
+                    console.log(`   Title: ${video.snippet.title}`);
+                    console.log(`   Video ID: ${item.id.videoId}`);
+                    console.log(`   Privacy: ${status.privacyStatus}`);
+                    console.log(`   Publish At: ${status.publishAt}`);
+                    console.log(`   Scheduled Time: ${new Date(status.publishAt).toLocaleString()}`);
+                } else if (isScheduled && !isFuture) {
+                    console.log(`\n⏰ Past scheduled video: ${video.snippet.title} (already passed)`);
+                }
+            }
+        }
+        
+        if (scheduledCount === 0) {
+            console.log(`\n❌ NO FUTURE SCHEDULED VIDEOS FOUND!`);
+            console.log(`   To schedule a video:`);
+            console.log(`   1. Upload a Short`);
+            console.log(`   2. Choose "Schedule" (NOT Public)`);
+            console.log(`   3. Pick a FUTURE date/time`);
+            console.log(`   4. Click "Schedule"`);
+        } else {
+            console.log(`\n✅ Total scheduled shorts: ${scheduledCount}`);
+        }
+        
+    } catch (error) {
+        console.error('❌ Debug error:', error.message);
+        if (error.message.includes('invalid_grant')) {
+            console.error('   Your REFRESH_TOKEN may have expired. Get a new one from OAuth Playground.');
+        }
+    }
+    
+    console.log('🔍 === DEBUG END === 🔍\n');
+}
+
+// ============ Get YOUR scheduled shorts ============
 async function getScheduledShorts() {
     try {
         const searchRes = await youtubeAuth.search.list({
@@ -43,7 +122,6 @@ async function getScheduledShorts() {
             });
             const status = videoRes.data.items[0]?.status;
             
-            // Scheduled = private + publishAt exists + future date
             if (status?.privacyStatus === 'private' && status?.publishAt) {
                 const scheduledTime = new Date(status.publishAt);
                 if (scheduledTime > new Date()) {
@@ -56,7 +134,7 @@ async function getScheduledShorts() {
             }
         }
         scheduled.sort((a, b) => a.time - b.time);
-        console.log(`📹 Scheduled shorts found: ${scheduled.length}`);
+        console.log(`📊 Scheduled shorts count: ${scheduled.length}`);
         return scheduled;
     } catch (error) {
         console.error('Error getting scheduled shorts:', error.message);
@@ -64,7 +142,7 @@ async function getScheduledShorts() {
     }
 }
 
-// Monitor target channel for new Shorts
+// ============ Monitor target channel ============
 async function monitor() {
     try {
         const res = await youtube.playlistItems.list({
@@ -78,7 +156,6 @@ async function monitor() {
         
         const videoId = latest.snippet.resourceId.videoId;
         
-        // New video detected
         if (videoId !== lastVideoId && lastVideoId !== null) {
             console.log(`\n🎬 NEW SHORT DETECTED!`);
             console.log(`📹 Title: ${latest.snippet.title}`);
@@ -108,20 +185,24 @@ async function monitor() {
 }
 
 // ============ START ============
-console.log('🚀 Starting YouTube Timing Bot...');
+console.log('\n🚀 ========== YOUTUBE TIMING BOT ==========');
 console.log(`📤 Your Channel ID: ${YOUR_CHANNEL_ID}`);
-console.log(`🎯 Target: @Tewahdotube-21`);
+console.log(`🎯 Target Channel ID: ${TARGET_CHANNEL_ID}`);
 console.log(`🔓 Unlimited copies`);
-console.log(`🔍 Monitoring every 30 seconds...`);
+console.log(`==========================================\n`);
 
-// Run first check immediately
+// Run debug immediately
+setTimeout(async () => {
+    await debugAllVideos();
+}, 2000);
+
+// Also run debug every 2 minutes
+setInterval(async () => {
+    await debugAllVideos();
+}, 120000);
+
+// Monitor every 30 seconds
+setInterval(monitor, 30000);
 monitor();
 
-// Then every 30 seconds
-setInterval(monitor, 30000);
-
-// Show supply count every 5 minutes
-setInterval(async () => {
-    const shorts = await getScheduledShorts();
-    console.log(`📊 Supply status: ${shorts.length} scheduled shorts`);
-}, 300000);
+console.log('🔍 Monitoring target channel every 30 seconds...');
