@@ -2,12 +2,12 @@ const { Telegraf } = require('telegraf');
 const { google } = require('googleapis');
 const express = require('express');
 
-// ============ ALL CREDENTIALS HARDCODED ============
-const BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE';  // ← PUT YOUR BOT TOKEN HERE
+// ============ ENVIRONMENT VARIABLES ============
+const BOT_TOKEN = process.env.BOT_TOKEN;  // ← Reads from Render Environment
 
+// Hardcoded credentials (or you can also move these to env)
 const YOUR_CHANNEL_ID = 'UCOyIZzz0KTwU2REuaji1Xuw';
 const TARGET_CHANNEL_ID = 'UCdXmlIXXiPuI8jEis3Ht5KQ';
-
 const CLIENT_ID = '39782137338-niqk6sud510hbe7cvj6o6jhjdu52kktl';
 const CLIENT_SECRET = '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';
 const REFRESH_TOKEN = '1//04t-MSLMiJSi8CgYIARAAGAQSNwF-L9IrbRXm4tDNl2pBvs4BhdLeVkx76PLDtLbEDw4ZbqRVR19d-ZpL0Sy6G1W6UYd_tIQbPgM';
@@ -22,6 +22,12 @@ let lastPublishedTime = null;
 const app = express();
 app.get('/', (req, res) => res.send('Bot Running'));
 app.listen(PORT, () => console.log(`🌐 Server on port ${PORT}`));
+
+// Check if BOT_TOKEN exists
+if (!BOT_TOKEN) {
+    console.error('❌ BOT_TOKEN is missing! Add it in Render Environment Variables.');
+    process.exit(1);
+}
 
 // Setup OAuth for YOUR channel
 const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, 'https://developers.google.com/oauthplayground');
@@ -127,7 +133,7 @@ async function monitorTarget() {
         const uploadTime = new Date(publishedAt).getTime();
         const now = Date.now();
         
-        // Ignore videos older than 1 minute (prevents old uploads on restart)
+        // Ignore videos older than 1 minute
         if (now - uploadTime > 60 * 1000) return;
         
         // First run: just remember the last video, do NOT publish
@@ -149,13 +155,11 @@ async function monitorTarget() {
                 return;
             }
             
-            // Calculate delay to post at EXACT same time
             const delay = calculateDelay(publishedAt);
             
             if (delay > 0) {
                 console.log(`⏰ Waiting ${Math.round(delay / 1000)} seconds to post at exact time...`);
                 console.log(`📤 Will publish: ${scheduled.title}`);
-                console.log(`🎯 Target time: ${new Date(publishedAt).toLocaleString()}`);
                 
                 setTimeout(async () => {
                     await makePublic(scheduled.id, scheduled.title);
@@ -163,7 +167,6 @@ async function monitorTarget() {
                     lastPublishedTime = new Date();
                 }, delay);
             } else {
-                // If delay is negative (already passed), publish immediately
                 console.log(`⚠️ Time already passed, publishing now...`);
                 await makePublic(scheduled.id, scheduled.title);
             }
@@ -230,6 +233,11 @@ bot.hears('🔄 REFRESH', async (ctx) => {
     );
 });
 
+// Error handling
+bot.catch((err, ctx) => {
+    console.error(`Bot error:`, err);
+});
+
 bot.launch();
 console.log('🤖 Bot started');
 
@@ -241,6 +249,5 @@ console.log(`🔓 Unlimited copies`);
 console.log(`⏰ Posts at EXACT same time as target!`);
 console.log(`🔍 Monitoring every 30 seconds...`);
 
-// Run first check immediately, then every 30 seconds
 monitorTarget();
 setInterval(monitorTarget, 30000);
