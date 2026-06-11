@@ -3,9 +3,8 @@ const { google } = require('googleapis');
 const express = require('express');
 
 // ============ ENVIRONMENT VARIABLES ============
-const BOT_TOKEN = process.env.BOT_TOKEN;  // ← Reads from Render Environment
+const BOT_TOKEN = process.env.BOT_TOKEN;
 
-// Hardcoded credentials (or you can also move these to env)
 const YOUR_CHANNEL_ID = 'UCOyIZzz0KTwU2REuaji1Xuw';
 const TARGET_CHANNEL_ID = 'UCdXmlIXXiPuI8jEis3Ht5KQ';
 const CLIENT_ID = '39782137338-niqk6sud510hbe7cvj6o6jhjdu52kktl';
@@ -23,9 +22,8 @@ const app = express();
 app.get('/', (req, res) => res.send('Bot Running'));
 app.listen(PORT, () => console.log(`🌐 Server on port ${PORT}`));
 
-// Check if BOT_TOKEN exists
 if (!BOT_TOKEN) {
-    console.error('❌ BOT_TOKEN is missing! Add it in Render Environment Variables.');
+    console.error('❌ BOT_TOKEN is missing!');
     process.exit(1);
 }
 
@@ -48,37 +46,54 @@ const mainKeyboard = {
     }
 };
 
-// ============ FUNCTIONS ============
-
-// Get scheduled shorts
+// ============ FIXED - Get scheduled shorts ============
 async function getScheduledShorts() {
     try {
         const response = await youtubeAuth.search.list({
             part: 'snippet',
             channelId: YOUR_CHANNEL_ID,
             type: 'video',
-            maxResults: 20
+            maxResults: 50
         });
         
         const scheduled = [];
         for (const item of response.data.items || []) {
             try {
-                const videoRes = await youtubeAuth.videos.list({ part: 'status', id: item.id.videoId });
+                const videoRes = await youtubeAuth.videos.list({
+                    part: 'status, snippet',
+                    id: item.id.videoId
+                });
+                
                 if (!videoRes.data.items?.length) continue;
-                const status = videoRes.data.items[0].status;
-                if (status?.privacyStatus === 'private' && status?.publishAt) {
-                    scheduled.push({
-                        id: item.id.videoId,
-                        title: item.snippet.title,
-                        time: new Date(status.publishAt)
-                    });
+                
+                const video = videoRes.data.items[0];
+                const status = video.status;
+                const publishAt = status.publishAt;
+                
+                // Check if it's scheduled (privacyStatus = 'private' AND publishAt exists)
+                if (status.privacyStatus === 'private' && publishAt) {
+                    const scheduledTime = new Date(publishAt);
+                    const now = new Date();
+                    
+                    // Only show future scheduled videos
+                    if (scheduledTime > now) {
+                        scheduled.push({
+                            id: item.id.videoId,
+                            title: video.snippet.title,
+                            time: scheduledTime
+                        });
+                    }
                 }
-            } catch (e) {}
+            } catch (e) {
+                console.error('Error fetching video:', e.message);
+            }
         }
+        
         scheduled.sort((a, b) => a.time - b.time);
+        console.log(`📹 Found ${scheduled.length} scheduled shorts`);
         return scheduled;
     } catch (error) {
-        console.error('Error:', error.message);
+        console.error('Error fetching scheduled shorts:', error.message);
         return [];
     }
 }
@@ -212,7 +227,11 @@ bot.hears('📦 SUPPLY', async (ctx) => {
     if (shorts.length === 0) {
         await ctx.reply(
             `📭 *No scheduled shorts found*\n\n` +
-            `Upload a Short to YouTube and choose "Schedule" instead of "Public".`,
+            `1. Upload a Short to YouTube\n` +
+            `2. Choose "Schedule" (NOT Public)\n` +
+            `3. Pick a future date/time\n` +
+            `4. Click "Schedule"\n\n` +
+            `Then tap REFRESH button.`,
             { parse_mode: 'Markdown', ...mainKeyboard }
         );
     } else {
@@ -233,7 +252,6 @@ bot.hears('🔄 REFRESH', async (ctx) => {
     );
 });
 
-// Error handling
 bot.catch((err, ctx) => {
     console.error(`Bot error:`, err);
 });
