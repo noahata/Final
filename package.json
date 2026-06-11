@@ -1,5 +1,5 @@
 {
-  "name": "youtube-timing-bot-multi",
+  "name": "youtube-timing-bot",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
