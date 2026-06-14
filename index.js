@@ -660,3 +660,247 @@ async function processZeroViewVideo(videoId, videoInfo, chatId = null) {
         }
     }
                 }
+// ============ ZERO VIEW MONITORING ============
+
+async function checkZeroViewVideos() {
+    try {
+        console.log(`\n🔍 Checking for zero-view videos...`);
+        const videos = await getPublicVideosWithDetails();
+        const now = new Date();
+        
+        for(const video of videos) {
+            const ageInMs = now - video.publishTime;
+            const ageInHours = ageInMs / (60 * 60 * 1000);
+            
+            if(video.viewCount === 0 && ageInMs >= ZERO_VIEW_CHECK_DELAY && !zeroViewVideos.has(video.id)) {
+                console.log(`⚠️ ZERO VIEW: "${video.title.substring(0, 50)}" (${ageInHours.toFixed(1)} hours old)`);
+                zeroViewVideos.set(video.id, {
+                    title: video.title,
+                    publishTime: video.publishTime,
+                    ageHours: ageInHours,
+                    warned: false,
+                    checkedAt: now,
+                    description: video.description
+                });
+            }
+        }
+        
+        for(const [videoId, info] of zeroViewVideos.entries()) {
+            if(!info.warned) {
+                console.log(`⚠️⚠️⚠️ ZERO VIEW WARNING ⚠️⚠️⚠️`);
+                console.log(`📹 "${info.title.substring(0, 50)}"`);
+                console.log(`🔄 Will re-upload in 5 minutes...`);
+                info.warned = true;
+                zeroViewVideos.set(videoId, info);
+                
+                try {
+                    await bot.telegram.sendMessage(process.env.ADMIN_CHAT_ID || 'YOUR_CHAT_ID', 
+                        `⚠️ *Zero View Detected!*\n\n📹 *${info.title.substring(0, 50)}*\n⏰ ${info.ageHours.toFixed(1)} hours old\n🔄 Processing in 5 minutes...`,
+                        { parse_mode: 'Markdown' });
+                } catch(teleError) {}
+            }
+        }
+        
+        for(const [videoId, info] of zeroViewVideos.entries()) {
+            if(info.warned) {
+                const video = videos.find(v => v.id === videoId);
+                if(video && video.viewCount === 0) {
+                    const timeSinceCheck = now - info.checkedAt;
+                    if(timeSinceCheck >= 5 * 60 * 1000) {
+                        console.log(`\n🚨 Processing: "${info.title.substring(0, 50)}"`);
+                        await processZeroViewVideo(videoId, info);
+                        zeroViewVideos.delete(videoId);
+                    }
+                } else if(video && video.viewCount > 0) {
+                    console.log(`✅ Video got views! Removing from tracking`);
+                    zeroViewVideos.delete(videoId);
+                }
+            }
+        }
+        
+        if(zeroViewVideos.size > 0) {
+            console.log(`\n📊 Monitoring: ${zeroViewVideos.size} video(s)`);
+        } else {
+            console.log(`✅ No zero-view videos tracked`);
+        }
+    } catch(e) {
+        console.error('Check error:', e.message);
+    }
+}
+
+function cleanupOldTempFiles() {
+    try {
+        const files = fs.readdirSync(TEMP_DIR);
+        const now = Date.now();
+        let deleted = 0;
+        files.forEach(file => {
+            const filePath = path.join(TEMP_DIR, file);
+            const stats = fs.statSync(filePath);
+            if (now - stats.mtimeMs > 60 * 60 * 1000) {
+                fs.unlinkSync(filePath);
+                deleted++;
+            }
+        });
+        if (deleted > 0) console.log(`🗑️ Cleaned up ${deleted} old temp file(s)`);
+    } catch (error) { console.error(`Cleanup error:`, error.message); }
+}
+
+function startZeroViewMonitoring() {
+    console.log(`\n🔍 FEATURE 2: Auto Zero-Views Monitor Active`);
+    console.log(`   Detection: 2 hours of 0 views`);
+    console.log(`   Action: Download → Re-upload → Delete original`);
+    console.log(`   New schedule: ${REUPLOAD_DELAY} days later\n`);
+    setInterval(cleanupOldTempFiles, 60 * 60 * 1000);
+    setTimeout(() => checkZeroViewVideos(), 60000);
+    setInterval(checkZeroViewVideos, 30 * 60 * 1000);
+}
+
+// ============ TELEGRAM BOT ============
+const bot = new Telegraf(BOT_TOKEN);
+const menu = { 
+    reply_markup: { 
+        keyboard: [
+            ['📊 STATUS', '📦 SUPPLY', '📹 LATEST POST'],
+            ['📥 SCHEDULE BY LINK', '⚠️ ZERO VIEWS STATUS', '🔄 REFRESH'],
+            ['🏷️ WATERMARK INFO', '📊 ZERO VIEWS', '🔍 CHECK ZERO']
+        ], 
+        resize_keyboard: true 
+    } 
+};
+
+// Handle all messages
+bot.on('text', async (ctx) => {
+    const text = ctx.message.text;
+    
+    if (text === '📊 STATUS') {
+        const scheduled = await getScheduledShorts();
+        const publicCount = await getPublicCount();
+        const latestPost = await getLatestPost();
+        let msg = `📊 *BOT STATUS*\n\n📹 Videos: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n\n*FEATURE 1:* Schedule by Link (Watermark: ${WATERMARK_TEXT})\n*FEATURE 2:* Zero-Views Tracked: ${zeroViewVideos.size}\n🔄 Processor: ${isZeroViewProcessing ? 'BUSY' : 'IDLE'}\n💾 Temp files: ${fs.readdirSync(TEMP_DIR).length}`;
+        if(latestPost) msg += `\n\n*Latest target:*\n📌 ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}`;
+        await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+    }
+    else if (text === '📥 SCHEDULE BY LINK') {
+        await ctx.reply(
+            `📥 **Schedule by Link (With Watermark)**\n\n` +
+            `Send me any YouTube link and I will:\n` +
+            `1️⃣ Download the video\n` +
+            `2️⃣ 🏷️ **Add watermark: "${WATERMARK_TEXT}"**\n` +
+            `3️⃣ Upload to YOUR channel\n` +
+            `4️⃣ Schedule for 7 days\n\n` +
+            `✨ Just paste a YouTube link!`,
+            { parse_mode: 'Markdown', ...menu }
+        );
+        return;
+    }
+    else if (text === '🏷️ WATERMARK INFO') {
+        await ctx.reply(
+            `🏷️ *Watermark Settings*\n\n` +
+            `**Text:** \`${WATERMARK_TEXT}\`\n` +
+            `**Position:** ${WATERMARK_POSITION}\n` +
+            `**Font Size:** ${WATERMARK_FONT_SIZE}px\n` +
+            `**Color:** ${WATERMARK_COLOR}\n\n` +
+            `📌 Added to all scheduled videos`,
+            { parse_mode: 'Markdown', ...menu }
+        );
+        return;
+    }
+    else if (text === '⚠️ ZERO VIEWS STATUS') {
+        if(zeroViewVideos.size === 0) {
+            await ctx.reply(`✅ No zero-view videos detected`, { ...menu });
+        } else {
+            let msg = `⚠️ *Zero-View Videos (${zeroViewVideos.size})*\n\n`;
+            let index = 1;
+            for(const [id, info] of zeroViewVideos.entries()) {
+                const ageHours = (Date.now() - info.publishTime) / (60 * 60 * 1000);
+                msg += `${index}. ${info.title.substring(0, 35)}\n   ⏰ ${ageHours.toFixed(1)} hours old | Status: ${info.warned ? '⏳ Processing' : '🔍 Watching'}\n\n`;
+                index++;
+            }
+            await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+        }
+        return;
+    }
+    else if (text === '📊 ZERO VIEWS') {
+        if(zeroViewVideos.size === 0) return ctx.reply('✅ No zero-view videos', { ...menu });
+        let msg = `⚠️ *Zero-View Videos (${zeroViewVideos.size})*\n\n`;
+        let index = 1;
+        for(const [id, info] of zeroViewVideos.entries()) {
+            const ageHours = (Date.now() - info.publishTime) / (60 * 60 * 1000);
+            msg += `${index}. ${info.title.substring(0, 35)}\n   ⏰ ${ageHours.toFixed(1)} hours old\n\n`;
+            index++;
+        }
+        await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+    }
+    else if (text === '🔍 CHECK ZERO') {
+        if(isZeroViewProcessing) return ctx.reply('⏳ Processing...', { ...menu });
+        await ctx.reply('🔍 Checking...');
+        await checkZeroViewVideos();
+        await ctx.reply(`✅ Checked\n📊 Tracking: ${zeroViewVideos.size} video(s)`, { ...menu });
+    }
+    else if (text === '📦 SUPPLY') {
+        const scheduled = await getScheduledShorts();
+        if(!scheduled.length) return ctx.reply('📭 No scheduled videos\n\nUse "Schedule by Link" to add videos!', { ...menu });
+        let msg = `📦 *SCHEDULED VIDEOS (${scheduled.length})*\n\n`;
+        scheduled.forEach((s,i) => msg += `${i+1}. ${s.title}\n   ⏰ ${s.time.toLocaleString()}\n\n`);
+        await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+    }
+    else if (text === '📹 LATEST POST') {
+        const latestPost = await getLatestPost();
+        if(!latestPost) return ctx.reply(`❌ Could not fetch latest post`, { ...menu });
+        await ctx.reply(`*📹 Latest from ${TARGET_CHANNEL_HANDLE}*\n\n*Title:* ${latestPost.title}\n*Published:* ${getTimeAgo(latestPost.publishedAt)}\n🔗 ${latestPost.url}`, { parse_mode: 'Markdown', ...menu, disable_web_page_preview: false });
+    }
+    else if (text === '🔄 REFRESH') {
+        scheduledCache = null;
+        await ctx.reply('🔄 Refreshing...');
+        const scheduled = await getScheduledShorts(true);
+        const latestPost = await getLatestPost();
+        let msg = `✅ Refreshed\n📅 Scheduled: ${scheduled.length}`;
+        if(latestPost) msg += `\n📹 Latest: ${latestPost.title}`;
+        await ctx.reply(msg, { ...menu });
+    }
+    else {
+        const youtubePattern = /(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)/i;
+        if (youtubePattern.test(text)) {
+            const urlMatch = text.match(/https?:\/\/(?:www\.)?(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))[^\s]+/i);
+            if (urlMatch) {
+                await handleScheduleByLink(ctx, urlMatch[0]);
+                return;
+            }
+        }
+        if (!text.startsWith('/')) {
+            await ctx.reply(`❓ Send a YouTube link to schedule it with watermark!\n🏷️ Watermark: "${WATERMARK_TEXT}"`, { ...menu });
+        }
+    }
+});
+
+bot.command('start', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const publicCount = await getPublicCount();
+    let msg = `🤖 *YouTube Bot - Two Features*\n\n📹 Your videos: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n\n✨ *Schedule by Link:* Send YouTube link → Watermark → Schedule (7 days)\n⚠️ *Auto Zero-Views:* Detects 0-view videos → Auto re-upload (${REUPLOAD_DELAY} days)\n\n🏷️ Watermark: "${WATERMARK_TEXT}"`;
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.launch();
+console.log('🤖 Telegram bot started');
+
+// ============ START ============
+console.log(`\n🚀 Starting YouTube Bot!`);
+console.log(`✨ FEATURE 1: Schedule by Link (Watermark: ${WATERMARK_TEXT})`);
+console.log(`⚠️ FEATURE 2: Auto Zero-Views (${REUPLOAD_DELAY} days reschedule)`);
+console.log(`📤 Channel ID: ${YOUR_CHANNEL_ID}\n`);
+
+// Initial check
+setTimeout(async () => {
+    const latest = await getLatestPost();
+    if(latest) {
+        console.log(`📹 Latest from target: "${latest.title}"`);
+        lastVideoId = latest.id;
+    }
+    const scheduled = await getScheduledShorts();
+    console.log(`📊 Initial stats: ${scheduled.length} scheduled videos`);
+}, 2000);
+
+// Start monitors
+setInterval(monitor, 30000);
+monitor();
+startZeroViewMonitoring();
