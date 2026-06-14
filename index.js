@@ -314,3 +314,349 @@ async function addWatermarkToVideo(inputPath, outputPath) {
             .run();
     });
     }
+// ============ FEATURE 1: SCHEDULE BY LINK (WITH WATERMARK) ============
+
+async function downloadVideoFromUrl(url, chatId, messageId, scheduleDays = 7) {
+    return new Promise(async (resolve, reject) => {
+        const videoId = extractVideoId(url);
+        if (!videoId) {
+            reject(new Error('Invalid YouTube URL'));
+            return;
+        }
+        
+        try {
+            const info = await ytdl.getInfo(url);
+            const videoTitle = info.videoDetails.title;
+            const sanitizedTitle = videoTitle.replace(/[^\w\s]/gi, '').substring(0, 50);
+            const timestamp = Date.now();
+            const tempPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_temp.mp4`);
+            const watermarkedPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_watermarked.mp4`);
+            
+            const format = ytdl.chooseFormat(info.formats, { quality: 'lowest', filter: 'audioandvideo' });
+            if (!format) throw new Error('No suitable format found');
+            
+            const totalSize = parseInt(format.contentLength) || 0;
+            const startTime = Date.now();
+            let downloaded = 0;
+            let lastUpdate = 0;
+            
+            await bot.telegram.editMessageText(chatId, messageId, null,
+                `🎬 **FEATURE 1: Schedule by Link**\n\n` +
+                `📹 **Title:** ${videoTitle.substring(0, 50)}\n` +
+                `🏷️ **Watermark:** ${WATERMARK_TEXT}\n\n` +
+                `📥 **Starting download...**`,
+                { parse_mode: 'Markdown' }
+            );
+            
+            const writeStream = fs.createWriteStream(tempPath);
+            const downloadStream = ytdl(url, { format: format });
+            
+            downloadStream.on('progress', async (chunkLength, downloadedBytes, totalBytes) => {
+                downloaded = downloadedBytes;
+                const now = Date.now();
+                if (now - lastUpdate > 2000 && totalBytes) {
+                    lastUpdate = now;
+                    const elapsed = (now - startTime) / 1000;
+                    const speed = downloaded / elapsed;
+                    const remainingBytes = totalBytes - downloaded;
+                    const timeRemaining = speed > 0 ? remainingBytes / speed : 0;
+                    const percent = (downloaded / totalBytes) * 100;
+                    const barLength = 20;
+                    const filled = Math.floor(barLength * percent / 100);
+                    const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
+                    
+                    const progressMsg = 
+                        `🎬 **Downloading...**\n\n` +
+                        `\`\`\`\n${bar} ${percent.toFixed(1)}%\n\`\`\`\n` +
+                        `📦 **Size:** ${formatFileSize(downloaded)} / ${formatFileSize(totalBytes)}\n` +
+                        `⚡ **Speed:** ${formatSpeed(speed)}\n` +
+                        `⏱️ **Time remaining:** ${Math.ceil(timeRemaining)}s\n\n` +
+                        `🔄 **Next:** Adding watermark → Uploading`;
+                    
+                    try {
+                        await bot.telegram.editMessageText(chatId, messageId, null, progressMsg, { parse_mode: 'Markdown' });
+                    } catch (e) {}
+                }
+            });
+            
+            downloadStream.pipe(writeStream);
+            
+            writeStream.on('finish', async () => {
+                console.log(`✅ Download complete!`);
+                await bot.telegram.editMessageText(chatId, messageId, null,
+                    `✅ **Download complete!**\n\n🎨 **Adding watermark: "${WATERMARK_TEXT}"**\n⏳ This may take a moment...`,
+                    { parse_mode: 'Markdown' }
+                );
+                
+                await addWatermarkToVideo(tempPath, watermarkedPath);
+                fs.unlinkSync(tempPath);
+                resolve({ filePath: watermarkedPath, title: videoTitle, description: info.videoDetails.description || '' });
+            });
+            
+            writeStream.on('error', reject);
+            downloadStream.on('error', reject);
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function uploadAndScheduleVideo(filePath, originalTitle, originalDescription, chatId, messageId, scheduleDays = 7) {
+    return new Promise(async (resolve, reject) => {
+        const scheduleDate = new Date();
+        scheduleDate.setDate(scheduleDate.getDate() + scheduleDays);
+        const newTitle = `[SCHEDULED] ${originalTitle.substring(0, 80)}`;
+        
+        await bot.telegram.editMessageText(chatId, messageId, null,
+            `✅ **Watermark added!**\n\n📤 **Uploading to YouTube...**\n📅 **Scheduled for:** ${scheduleDate.toLocaleString()} (${scheduleDays} days from now)\n\n⏳ This may take a few minutes...`,
+            { parse_mode: 'Markdown' }
+        );
+        
+        try {
+            const requestBody = {
+                snippet: {
+                    title: newTitle,
+                    description: `📥 **Scheduled via Bot**\n\n🏷️ **Watermark:** ${WATERMARK_TEXT}\n📅 **Scheduled for:** ${scheduleDate.toLocaleString()}\n\n${originalDescription.substring(0, 500)}`,
+                    tags: ['scheduled', 'watermark', 'noah_technical'],
+                    categoryId: '22'
+                },
+                status: {
+                    privacyStatus: 'private',
+                    publishAt: scheduleDate.toISOString(),
+                    selfDeclaredMadeForKids: false
+                }
+            };
+            
+            const response = await youtubeAuth.videos.insert({
+                part: 'snippet,status',
+                requestBody: requestBody,
+                media: { body: fs.createReadStream(filePath), mimeType: 'video/mp4' }
+            });
+            
+            console.log(`✅ Upload complete! New ID: ${response.data.id}`);
+            scheduledCache = null;
+            resolve({ videoId: response.data.id, scheduleDate: scheduleDate });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function handleScheduleByLink(ctx, url) {
+    if (activeDownloads.has(ctx.chat.id)) {
+        await ctx.reply(`⏳ **Please wait!** A download is already in progress.`, { parse_mode: 'Markdown', ...menu });
+        return;
+    }
+    
+    activeDownloads.set(ctx.chat.id, true);
+    const progressMsg = await ctx.reply(`🎬 **Processing your link...**\n🏷️ Watermark: ${WATERMARK_TEXT}`, { parse_mode: 'Markdown' });
+    let downloadedFile = null;
+    
+    try {
+        const downloadResult = await downloadVideoFromUrl(url, ctx.chat.id, progressMsg.message_id, 7);
+        downloadedFile = downloadResult.filePath;
+        const uploadResult = await uploadAndScheduleVideo(downloadedFile, downloadResult.title, downloadResult.description, ctx.chat.id, progressMsg.message_id, 7);
+        
+        await bot.telegram.editMessageText(ctx.chat.id, progressMsg.message_id, null,
+            `✅ **VIDEO SCHEDULED SUCCESSFULLY!**\n\n` +
+            `📹 **Title:** ${downloadResult.title.substring(0, 50)}\n` +
+            `🏷️ **Watermark:** ${WATERMARK_TEXT}\n` +
+            `🆔 **Video ID:** \`${uploadResult.videoId}\`\n` +
+            `📅 **Scheduled for:** ${uploadResult.scheduleDate.toLocaleString()}\n\n` +
+            `🔄 **Process:** Download ✅ → Watermark ✅ → Upload ✅ → Scheduled ✅`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (error) {
+        await bot.telegram.editMessageText(ctx.chat.id, progressMsg.message_id, null,
+            `❌ **SCHEDULE FAILED**\n\n❌ **Error:** ${error.message}`,
+            { parse_mode: 'Markdown' }
+        );
+    } finally {
+        activeDownloads.delete(ctx.chat.id);
+        if (downloadedFile) {
+            setTimeout(() => {
+                try { if (fs.existsSync(downloadedFile)) fs.unlinkSync(downloadedFile); } catch(e) {}
+            }, 5000);
+        }
+    }
+}
+
+// ============ FEATURE 2: AUTO ZERO-VIEWS RESCHEDULE ============
+
+async function getPublicVideosWithDetails() {
+    try {
+        let allVideos = [], page = null;
+        do {
+            const res = await youtubeAuth.search.list({ part: 'snippet', channelId: YOUR_CHANNEL_ID, type: 'video', maxResults: 50, pageToken: page });
+            const ids = (res.data.items||[]).map(i => i.id.videoId).filter(id=>id);
+            if(ids.length) {
+                const videoRes = await youtubeAuth.videos.list({ part: 'statistics,snippet,status', id: ids.join(',') });
+                for(const video of videoRes.data.items||[]) {
+                    if(video?.status?.privacyStatus === 'public') {
+                        allVideos.push({
+                            id: video.id,
+                            title: video.snippet.title,
+                            viewCount: parseInt(video.statistics.viewCount) || 0,
+                            publishTime: new Date(video.snippet.publishedAt),
+                            description: video.snippet.description || ''
+                        });
+                    }
+                }
+            }
+            page = res.data.nextPageToken;
+        } while(page);
+        return allVideos;
+    } catch(e) { 
+        console.error('Error getting videos:', e.message);
+        return []; 
+    }
+}
+
+async function downloadZeroViewVideo(videoId, videoTitle, chatId, messageId) {
+    return new Promise(async (resolve, reject) => {
+        const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        const timestamp = Date.now();
+        const outputPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_zero.mp4`);
+        
+        try {
+            const info = await ytdl.getInfo(videoUrl);
+            const format = ytdl.chooseFormat(info.formats, { quality: 'lowest', filter: 'audioandvideo' });
+            if (!format) throw new Error('No suitable format found');
+            
+            const totalSize = parseInt(format.contentLength) || 0;
+            const startTime = Date.now();
+            let downloaded = 0;
+            let lastUpdate = 0;
+            
+            const writeStream = fs.createWriteStream(outputPath);
+            const downloadStream = ytdl(videoUrl, { format: format });
+            
+            downloadStream.on('progress', async (chunkLength, downloadedBytes, totalBytes) => {
+                downloaded = downloadedBytes;
+                const now = Date.now();
+                if (now - lastUpdate > 2000 && totalBytes) {
+                    lastUpdate = now;
+                    const elapsed = (now - startTime) / 1000;
+                    const speed = downloaded / elapsed;
+                    const remainingBytes = totalBytes - downloaded;
+                    const timeRemaining = speed > 0 ? remainingBytes / speed : 0;
+                    const percent = (downloaded / totalBytes) * 100;
+                    const barLength = 20;
+                    const filled = Math.floor(barLength * percent / 100);
+                    const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
+                    
+                    const progressMsg = 
+                        `⚠️ **FEATURE 2: Auto Zero-Views**\n\n` +
+                        `📹 **${videoTitle.substring(0, 40)}**\n\n` +
+                        `\`\`\`\n${bar} ${percent.toFixed(1)}%\n\`\`\`\n` +
+                        `📦 **Size:** ${formatFileSize(downloaded)} / ${formatFileSize(totalBytes)}\n` +
+                        `⚡ **Speed:** ${formatSpeed(speed)}\n` +
+                        `⏱️ **Time remaining:** ${Math.ceil(timeRemaining)}s`;
+                    
+                    try {
+                        await bot.telegram.editMessageText(chatId, messageId, null, progressMsg, { parse_mode: 'Markdown' });
+                    } catch (e) {}
+                }
+            });
+            
+            downloadStream.pipe(writeStream);
+            writeStream.on('finish', () => resolve(outputPath));
+            writeStream.on('error', reject);
+            downloadStream.on('error', reject);
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function reuploadZeroViewVideo(filePath, originalTitle, originalDescription, chatId, messageId) {
+    return new Promise(async (resolve, reject) => {
+        const scheduleDate = new Date();
+        scheduleDate.setDate(scheduleDate.getDate() + REUPLOAD_DELAY);
+        const newTitle = `[REUPLOAD] ${originalTitle.substring(0, 80)}`;
+        
+        await bot.telegram.editMessageText(chatId, messageId, null,
+            `✅ **Download complete!**\n\n📤 **Re-uploading to YouTube...**\n📅 **New schedule:** ${scheduleDate.toLocaleString()} (${REUPLOAD_DELAY} days)`,
+            { parse_mode: 'Markdown' }
+        );
+        
+        try {
+            const requestBody = {
+                snippet: {
+                    title: newTitle,
+                    description: `⚠️ **AUTO-REUPLOADED DUE TO ZERO VIEWS** ⚠️\n\nOriginal upload: ${new Date().toLocaleString()}\nReason: 0 views after 2 hours\nNew schedule: ${scheduleDate.toLocaleString()}\n\n${originalDescription.substring(0, 500)}`,
+                    tags: ['reupload', 'auto-reupload', 'zero-views'],
+                    categoryId: '22'
+                },
+                status: {
+                    privacyStatus: 'private',
+                    publishAt: scheduleDate.toISOString(),
+                    selfDeclaredMadeForKids: false
+                }
+            };
+            
+            const response = await youtubeAuth.videos.insert({
+                part: 'snippet,status',
+                requestBody: requestBody,
+                media: { body: fs.createReadStream(filePath), mimeType: 'video/mp4' }
+            });
+            
+            scheduledCache = null;
+            resolve({ videoId: response.data.id, scheduleDate: scheduleDate });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function deleteOriginalVideo(videoId, title) {
+    try {
+        console.log(`🗑️ Deleting original: "${title.substring(0, 50)}"`);
+        await youtubeAuth.videos.delete({ id: videoId });
+        console.log(`✅ Original deleted`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Delete failed:`, error.message);
+        return false;
+    }
+}
+
+async function processZeroViewVideo(videoId, videoInfo, chatId = null) {
+    if (isZeroViewProcessing) return false;
+    isZeroViewProcessing = true;
+    let downloadedFile = null;
+    let progressMessageId = null;
+    const targetChatId = chatId || process.env.ADMIN_CHAT_ID;
+    
+    try {
+        if (targetChatId) {
+            const progressMsg = await bot.telegram.sendMessage(targetChatId,
+                `⚠️ **FEATURE 2: Auto Zero-Views Active**\n\n` +
+                `📹 **Video:** ${videoInfo.title.substring(0, 50)}\n` +
+                `⏰ **Age:** ${videoInfo.ageHours.toFixed(1)} hours\n` +
+                `📊 **Views:** 0\n\n🔄 **Starting auto re-upload...**`,
+                { parse_mode: 'Markdown' }
+            );
+            progressMessageId = progressMsg.message_id;
+        }
+        
+        downloadedFile = await downloadZeroViewVideo(videoId, videoInfo.title, targetChatId, progressMessageId);
+        const uploadResult = await reuploadZeroViewVideo(downloadedFile, videoInfo.title, videoInfo.description, targetChatId, progressMessageId);
+        await deleteOriginalVideo(videoId, videoInfo.title);
+        
+        const successMsg = `✅ **ZERO-VIEW VIDEO RE-UPLOADED!**\n\n📹 ${videoInfo.title.substring(0, 50)}\n📅 New schedule: ${uploadResult.scheduleDate.toLocaleString()}`;
+        
+        if (targetChatId && progressMessageId) {
+            await bot.telegram.editMessageText(targetChatId, progressMessageId, null, successMsg, { parse_mode: 'Markdown' });
+        }
+        return true;
+    } catch (error) {
+        console.error(`❌ Processing failed:`, error.message);
+        return false;
+    } finally {
+        isZeroViewProcessing = false;
+        if (downloadedFile) {
+            setTimeout(() => { try { if (fs.existsSync(downloadedFile)) fs.unlinkSync(downloadedFile); } catch(e) {} }, 5000);
+        }
+    }
+                }
