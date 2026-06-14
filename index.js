@@ -4,6 +4,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const cheerio = require('cheerio');
 
 // ============ CREDENTIALS ============
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -45,7 +46,7 @@ if (!fs.existsSync(TEMP_DIR)) {
 // =========================================
 const PORT = process.env.PORT || 3000;
 const app = express();
-app.get('/', (req, res) => res.send('Bot Running - 720p ytdown.to'));
+app.get('/', (req, res) => res.send('Bot Running - ytDown.to Scraper 720p'));
 app.listen(PORT, () => console.log(`🌐 Server on port ${PORT}`));
 
 // Setup OAuth
@@ -236,39 +237,95 @@ function getTimeAgo(dateString) {
     return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
 }
 
-// ============ YTDOWN.TO 720p DOWNLOADER ============
+// ============ YTDOWN.TO SCRAPER (WORKS!) ============
 
-async function downloadWithYtDown(videoUrl, videoId, videoTitle) {
-    console.log(`🌐 Downloading 720p via ytdown.to: ${videoUrl}`);
+async function downloadViaYtDownScraper(videoUrl, videoId, videoTitle) {
+    console.log(`🌐 Scraping ytDown.to for: ${videoUrl}`);
     
     const sanitizedTitle = videoTitle.replace(/[^\w\s]/gi, '').substring(0, 50);
     const filePath = path.join(TEMP_DIR, `${videoId}_${Date.now()}_${sanitizedTitle}.mp4`);
     
     try {
-        const response = await axios({
-            method: 'post',
-            url: 'https://app.ytdown.to/api/download',
-            data: { url: videoUrl, format: 'mp4', quality: '720p' },
+        // Step 1: Get the main page
+        const mainPage = await axios.get('https://app.ytdown.to/en34/', {
             headers: {
-                'Content-Type': 'application/json',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Origin': 'https://app.ytdown.to',
-                'Referer': 'https://app.ytdown.to/en34/'
-            },
-            timeout: 60000
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            }
         });
         
-        if (!response.data || !response.data.downloadUrl) {
-            throw new Error('No download URL from ytdown.to');
+        const $ = cheerio.load(mainPage.data);
+        
+        // Step 2: Find the form action URL
+        const formAction = $('#downloadForm').attr('action') || '/en34/';
+        const fullActionUrl = formAction.startsWith('http') ? formAction : `https://app.ytdown.to${formAction}`;
+        
+        // Step 3: Submit the video URL
+        const formData = new URLSearchParams();
+        formData.append('url', videoUrl);
+        
+        const submitResponse = await axios.post(fullActionUrl, formData, {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://app.ytdown.to/en34/'
+            }
+        });
+        
+        // Step 4: Parse the response to get download links
+        const $$ = cheerio.load(submitResponse.data);
+        
+        // Try to find 720p download link
+        let downloadLink = null;
+        
+        // Look for 720p quality button/link
+        $$('a.btn, button.btn, .download-link, .quality-btn').each((i, el) => {
+            const text = $$(el).text().toLowerCase();
+            const href = $$(el).attr('href');
+            if ((text.includes('720') || text.includes('hd') || text.includes('mp4')) && href) {
+                downloadLink = href;
+            }
+        });
+        
+        // If not found, get any download link
+        if (!downloadLink) {
+            $$('a[href*="download"], a[href*="get-video"]').each((i, el) => {
+                const href = $$(el).attr('href');
+                if (href && !downloadLink) {
+                    downloadLink = href;
+                }
+            });
         }
         
-        console.log(`✅ Got 720p download URL`);
+        if (!downloadLink) {
+            // Try to find in script tags
+            const scripts = $$('script').toString();
+            const urlMatch = scripts.match(/https?:\/\/[^\s"']+\.mp4/);
+            if (urlMatch) {
+                downloadLink = urlMatch[0];
+            }
+        }
         
+        if (!downloadLink) {
+            throw new Error('Could not find download link in ytDown.to response');
+        }
+        
+        // Make sure URL is absolute
+        if (downloadLink.startsWith('/')) {
+            downloadLink = `https://app.ytdown.to${downloadLink}`;
+        }
+        
+        console.log(`✅ Found download link: ${downloadLink.substring(0, 80)}...`);
+        
+        // Step 5: Download the video
         const fileResponse = await axios({
             method: 'get',
-            url: response.data.downloadUrl,
+            url: downloadLink,
             responseType: 'stream',
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://app.ytdown.to/'
+            },
             timeout: 120000
         });
         
@@ -281,295 +338,12 @@ async function downloadWithYtDown(videoUrl, videoId, videoTitle) {
         });
         
         const sizeMB = fs.statSync(filePath).size / (1024 * 1024);
-        console.log(`✅ Downloaded 720p: ${sizeMB.toFixed(2)} MB`);
+        console.log(`✅ Downloaded via ytDown.to: ${sizeMB.toFixed(2)} MB`);
         return filePath;
         
     } catch (error) {
+        console.error(`❌ ytDown.to scraper failed:`, error.message);
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        throw new Error(`ytdown.to 720p failed: ${error.message}`);
-    }
-                             }
-async function getPublicVideosWithDetails() {
-    try {
-        let allVideos = [];
-        let page = null;
-        
-        do {
-            const res = await youtubeAuth.search.list({ 
-                part: 'snippet', 
-                channelId: YOUR_CHANNEL_ID, 
-                type: 'video', 
-                maxResults: 50, 
-                pageToken: page 
-            });
-            
-            const ids = (res.data.items||[]).map(i => i.id.videoId).filter(id=>id);
-            if(ids.length) {
-                const videoRes = await youtubeAuth.videos.list({ 
-                    part: 'statistics,snippet,status', 
-                    id: ids.join(',') 
-                });
-                
-                for(const video of videoRes.data.items||[]) {
-                    if(video?.status?.privacyStatus === 'public') {
-                        allVideos.push({
-                            id: video.id,
-                            title: video.snippet.title,
-                            viewCount: parseInt(video.statistics.viewCount) || 0,
-                            publishTime: new Date(video.snippet.publishedAt),
-                            description: video.snippet.description || '',
-                            url: `https://www.youtube.com/watch?v=${video.id}`
-                        });
-                    }
-                }
-            }
-            page = res.data.nextPageToken;
-        } while(page);
-        
-        return allVideos;
-    } catch(e) { 
-        console.error('Error:', e.message);
-        return []; 
+        throw error;
     }
 }
-
-async function uploadVideoFromDisk(filePath, originalTitle, originalDescription = '') {
-    return new Promise(async (resolve, reject) => {
-        console.log(`📤 Uploading: ${path.basename(filePath)}`);
-        
-        const scheduleDate = new Date();
-        scheduleDate.setDate(scheduleDate.getDate() + REUPLOAD_DELAY);
-        const newTitle = `[REUPLOAD 720p] ${originalTitle.substring(0, 70)}`;
-        
-        try {
-            const requestBody = {
-                snippet: {
-                    title: newTitle,
-                    description: `⚠️ AUTO-REUPLOADED 720p ⚠️\n\nOriginal: ${new Date().toLocaleString()}\nReason: 0 views after 2 hours\nDownloaded: ytdown.to\nScheduled: ${scheduleDate.toLocaleString()}\n\n${originalDescription.substring(0, 500)}`,
-                    tags: ['reupload', '720p', 'ytdown'],
-                    categoryId: '22'
-                },
-                status: {
-                    privacyStatus: 'private',
-                    publishAt: scheduleDate.toISOString(),
-                    selfDeclaredMadeForKids: false
-                }
-            };
-            
-            const response = await youtubeAuth.videos.insert({
-                part: 'snippet,status',
-                requestBody: requestBody,
-                media: { body: fs.createReadStream(filePath), mimeType: 'video/mp4' }
-            });
-            
-            console.log(`✅ Uploaded! New ID: ${response.data.id}`);
-            scheduledCache = null;
-            resolve({ videoId: response.data.id, scheduleDate: scheduleDate });
-        } catch (error) {
-            reject(error);
-        }
-    });
-}
-
-async function deleteOriginalVideo(videoId, title) {
-    try {
-        console.log(`🗑️ Deleting original: "${title.substring(0, 50)}"`);
-        await youtubeAuth.videos.delete({ id: videoId });
-        console.log(`✅ Deleted`);
-        return true;
-    } catch (error) {
-        console.error(`❌ Delete failed:`, error.message);
-        return false;
-    }
-}
-
-function cleanupTempFile(filePath) {
-    try {
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-            console.log(`🗑️ Cleaned: ${path.basename(filePath)}`);
-        }
-    } catch (error) {}
-}
-
-async function processZeroViewVideo(videoId, videoInfo) {
-    if (isZeroViewProcessing) return false;
-    isZeroViewProcessing = true;
-    let downloadedFile = null;
-    
-    try {
-        console.log(`\n🔄 PROCESSING ZERO-VIEW VIDEO (720p)`);
-        console.log(`📹 "${videoInfo.title.substring(0, 60)}"`);
-        
-        downloadedFile = await downloadWithYtDown(videoInfo.url, videoId, videoInfo.title);
-        
-        const uploadResult = await uploadVideoFromDisk(downloadedFile, videoInfo.title, videoInfo.description);
-        await deleteOriginalVideo(videoId, videoInfo.title);
-        
-        const successMsg = `✅ *720p Video Processed*\n\n📹 ${videoInfo.title.substring(0, 50)}\n📅 Scheduled: ${uploadResult.scheduleDate.toLocaleString()}`;
-        try { await bot.telegram.sendMessage(process.env.ADMIN_CHAT_ID || 'YOUR_CHAT_ID', successMsg, { parse_mode: 'Markdown' }); } catch(e) {}
-        
-        return true;
-    } catch (error) {
-        console.error(`❌ Failed:`, error.message);
-        const errorMsg = `❌ *720p Processing Failed*\n\n📹 ${videoInfo.title.substring(0, 50)}\n❌ ${error.message}`;
-        try { await bot.telegram.sendMessage(process.env.ADMIN_CHAT_ID || 'YOUR_CHAT_ID', errorMsg, { parse_mode: 'Markdown' }); } catch(e) {}
-        return false;
-    } finally {
-        isZeroViewProcessing = false;
-        if (downloadedFile) cleanupTempFile(downloadedFile);
-    }
-}
-
-async function checkZeroViewVideos() {
-    try {
-        console.log(`\n🔍 Checking for zero-view videos...`);
-        const videos = await getPublicVideosWithDetails();
-        const now = new Date();
-        
-        for(const video of videos) {
-            const ageInMs = now - video.publishTime;
-            const ageInHours = ageInMs / (60 * 60 * 1000);
-            
-            if(video.viewCount === 0 && ageInMs >= ZERO_VIEW_CHECK_DELAY && !zeroViewVideos.has(video.id)) {
-                console.log(`⚠️ ZERO VIEW: "${video.title.substring(0, 50)}" (${ageInHours.toFixed(1)} hours)`);
-                zeroViewVideos.set(video.id, {
-                    title: video.title, ageHours: ageInHours, warned: false,
-                    checkedAt: now, description: video.description, url: video.url
-                });
-            }
-        }
-        
-        for(const [videoId, info] of zeroViewVideos.entries()) {
-            if(!info.warned) {
-                console.log(`⚠️⚠️ ZERO VIEW WARNING: "${info.title.substring(0, 50)}"`);
-                info.warned = true;
-                zeroViewVideos.set(videoId, info);
-                try {
-                    await bot.telegram.sendMessage(process.env.ADMIN_CHAT_ID || 'YOUR_CHAT_ID', 
-                        `⚠️ Zero View - 720p\n📹 ${info.title.substring(0, 50)}\n🔄 Processing in 5 min`, 
-                        { parse_mode: 'Markdown' });
-                } catch(e) {}
-            }
-        }
-        
-        for(const [videoId, info] of zeroViewVideos.entries()) {
-            if(info.warned) {
-                const video = videos.find(v => v.id === videoId);
-                if(video && video.viewCount === 0) {
-                    if(Date.now() - info.checkedAt >= 5 * 60 * 1000) {
-                        await processZeroViewVideo(videoId, info);
-                        zeroViewVideos.delete(videoId);
-                    }
-                } else if(video && video.viewCount > 0) {
-                    zeroViewVideos.delete(videoId);
-                }
-            }
-        }
-    } catch(e) {
-        console.error('Error:', e.message);
-    }
-}
-
-function startZeroViewMonitoring() {
-    console.log(`\n🔍 720p Zero-View Monitor Active`);
-    console.log(`   Quality: 720p Standard`);
-    console.log(`   Downloader: ytdown.to ONLY (no fallback)`);
-    console.log(`   Action: Download 720p → Re-upload → Delete`);
-    console.log(`   Schedule: ${REUPLOAD_DELAY} days later\n`);
-    
-    setTimeout(() => checkZeroViewVideos(), 60000);
-    setInterval(checkZeroViewVideos, 30 * 60 * 1000);
-}
-
-// ============ TELEGRAM BOT ============
-const bot = new Telegraf(BOT_TOKEN);
-const menu = { 
-    reply_markup: { 
-        keyboard: [['📊 STATUS', '📦 SUPPLY', '📹 LATEST POST'], 
-                   ['📊 ZERO VIEWS', '🔍 CHECK ZERO', '🔄 REFRESH']], 
-        resize_keyboard: true 
-    } 
-};
-
-bot.command('start', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    const publicCount = await getPublicCount();
-    const latestPost = await getLatestPost();
-    
-    let msg = `🤖 *YouTube Bot - 720p*\n\n📹 Videos: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n🎬 Quality: 720p (ytdown.to)\n\n`;
-    if(latestPost) msg += `📹 Latest: ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n\n`;
-    if(scheduled.length > 0) msg += `📋 Next: ${scheduled[0].title}\n⏰ ${scheduled[0].time.toLocaleString()}`;
-    else msg += `📭 No scheduled shorts`;
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu, disable_web_page_preview: true });
-});
-
-bot.hears('📊 STATUS', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    const publicCount = await getPublicCount();
-    const latestPost = await getLatestPost();
-    let msg = `📊 *STATUS - 720p*\n\n📹 Public: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n⚠️ Zero-view: ${zeroViewVideos.size}\n🎬 Quality: 720p\n📥 Downloader: ytdown.to\n\n`;
-    if(latestPost) msg += `Latest: ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}`;
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('📹 LATEST POST', async (ctx) => {
-    const latestPost = await getLatestPost();
-    if(!latestPost) return ctx.reply('❌ Cannot fetch', { ...menu });
-    ctx.reply(`*Latest from ${TARGET_CHANNEL_HANDLE}*\n\n${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n\n🔗 ${latestPost.url}`, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('📦 SUPPLY', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    if(!scheduled.length) return ctx.reply('📭 No scheduled shorts', { ...menu });
-    let msg = `📦 *SUPPLY (${scheduled.length})*\n\n`;
-    scheduled.forEach((s,i) => msg += `${i+1}. ${s.title}\n   ⏰ ${s.time.toLocaleString()}\n\n`);
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('🔄 REFRESH', async (ctx) => {
-    scheduledCache = null;
-    ctx.reply('🔄 Refreshing...');
-    const scheduled = await getScheduledShorts(true);
-    ctx.reply(`✅ Refreshed\n📅 Scheduled: ${scheduled.length}`, { ...menu });
-});
-
-bot.hears('📊 ZERO VIEWS', async (ctx) => {
-    if(zeroViewVideos.size === 0) return ctx.reply('✅ No zero-view videos', { ...menu });
-    let msg = `⚠️ *Zero-Views (720p)* (${zeroViewVideos.size})\n\n`;
-    let i = 1;
-    for(const [id, info] of zeroViewVideos.entries()) {
-        const age = (Date.now() - info.publishTime) / (60 * 60 * 1000);
-        msg += `${i}. ${info.title.substring(0, 35)}\n   ⏰ ${age.toFixed(1)}h | ${info.warned ? '⏳' : '🔍'}\n\n`;
-        i++;
-    }
-    msg += `💡 ytdown.to 720p → Upload → Delete (no fallback)`;
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('🔍 CHECK ZERO', async (ctx) => {
-    if(isZeroViewProcessing) return ctx.reply('⏳ Busy', { ...menu });
-    ctx.reply('🔍 Checking 720p videos...');
-    await checkZeroViewVideos();
-    ctx.reply(`✅ Done\n📊 Tracking: ${zeroViewVideos.size}`, { ...menu });
-});
-
-bot.launch();
-console.log('🤖 Telegram bot started');
-
-// ============ START ============
-console.log(`\n🚀 Starting YouTube Bot - 720p QUALITY`);
-console.log(`🎬 Video Quality: 720p Standard`);
-console.log(`📥 Downloader: ytdown.to ONLY (no fallback)`);
-console.log(`💾 Temp: ${TEMP_DIR}\n`);
-
-setTimeout(async () => {
-    const latest = await getLatestPost();
-    if(latest) lastVideoId = latest.id;
-    const scheduled = await getScheduledShorts();
-    console.log(`📊 ${scheduled.length} scheduled videos`);
-}, 2000);
-
-setInterval(monitor, 30000);
-monitor();
-startZeroViewMonitoring();
