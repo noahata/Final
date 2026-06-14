@@ -412,3 +412,354 @@ async function getVideoInfoWithRetry(url, retries = 3) {
     }
     throw new Error('Failed after retries');
     }
+async function downloadWithRetry(url, format, streamOptions, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await new Promise((resolve, reject) => {
+                const options = {
+                    agent: proxyAgent,
+                    requestOptions: {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                            'Cookie': cookieString
+                        }
+                    }
+                };
+                const stream = ytdl(url, { ...options, ...streamOptions, format: format });
+                stream.on('error', (err) => reject(err));
+                resolve(stream);
+            });
+        } catch (error) {
+            console.log(`Download attempt ${i + 1} failed: ${error.message}`);
+            if (error.message.includes('429') || error.message.includes('410')) {
+                rotateProxy();
+                await wait((i + 1) * 45000);
+                continue;
+            }
+            if (i === retries - 1) throw error;
+            await wait(10000);
+        }
+    }
+    throw new Error('Download failed after retries');
+}
+
+async function downloadAndSchedule(url, chatId, messageId) {
+    return new Promise(async (resolve, reject) => {
+        const videoId = extractVideoId(url);
+        if (!videoId) {
+            reject(new Error('Invalid YouTube URL'));
+            return;
+        }
+        
+        try {
+            await safeEdit(bot, chatId, messageId, `Getting video information... Please wait...`);
+            
+            const info = await getVideoInfoWithRetry(url);
+            const videoTitle = info.videoDetails.title;
+            const timestamp = Date.now();
+            const tempPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_temp.mp4`);
+            const watermarkedPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_wm.mp4`);
+            
+            const format = ytdl.chooseFormat(info.formats, { quality: 'lowest', filter: 'audioandvideo' });
+            if (!format) throw new Error('No video format found');
+            
+            const totalSize = parseInt(format.contentLength) || 0;
+            const startTime = Date.now();
+            let lastUpdate = 0;
+            
+            await safeEdit(bot, chatId, messageId, `Found: ${videoTitle.substring(0, 50)}\n\nDownloading...`);
+            
+            const streamOptions = {};
+            if (agent) streamOptions.agent = agent;
+            
+            const writeStream = fs.createWriteStream(tempPath);
+            const downloadStream = await downloadWithRetry(url, format, streamOptions);
+            
+            downloadStream.on('progress', async (chunk, downloaded, total) => {
+                const now = Date.now();
+                if (now - lastUpdate > 3000 && total) {
+                    lastUpdate = now;
+                    const percent = (downloaded / total) * 100;
+                    const elapsed = (now - startTime) / 1000;
+                    const speed = downloaded / elapsed;
+                    const remaining = (total - downloaded) / speed;
+                    const barLength = 20;
+                    const filled = Math.floor(percent / 5);
+                    const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
+                    
+                    await safeEdit(bot, chatId, messageId,
+                        `Downloading...\n\n[${bar}] ${percent.toFixed(1)}%\n\n` +
+                        `Size: ${formatFileSize(downloaded)} / ${formatFileSize(total)}\n` +
+                        `Speed: ${formatSpeed(speed)}\n` +
+                        `Time left: ${Math.ceil(remaining)}s`
+                    );
+                }
+            });
+            
+            downloadStream.pipe(writeStream);
+            
+            writeStream.on('finish', async () => {
+                await safeEdit(bot, chatId, messageId, `Download complete!\n\nAdding watermark...`);
+                await addWatermark(tempPath, watermarkedPath);
+                fs.unlinkSync(tempPath);
+                
+                const scheduleDate = new Date();
+                scheduleDate.setDate(scheduleDate.getDate() + 7);
+                
+                await safeEdit(bot, chatId, messageId, `Uploading to YouTube...\nScheduled for: ${scheduleDate.toLocaleString()}`);
+                
+                const response = await youtubeAuth.videos.insert({
+                    part: 'snippet,status',
+                    requestBody: {
+                        snippet: {
+                            title: `[SCHEDULED] ${videoTitle.substring(0, 80)}`,
+                            description: `Scheduled via Bot\nWatermark: ${WATERMARK_TEXT}\nDate: ${scheduleDate.toLocaleString()}`,
+                            categoryId: '22'
+                        },
+                        status: {
+                            privacyStatus: 'private',
+                            publishAt: scheduleDate.toISOString(),
+                            selfDeclaredMadeForKids: false
+                        }
+                    },
+                    media: { body: fs.createReadStream(watermarkedPath), mimeType: 'video/mp4' }
+                });
+                
+                fs.unlinkSync(watermarkedPath);
+                scheduledCache = null;
+                
+                resolve({ videoId: response.data.id, scheduleDate, title: videoTitle });
+            });
+            
+            writeStream.on('error', reject);
+            downloadStream.on('error', reject);
+            
+        } catch (error) {
+            console.error('Download error:', error.message);
+            reject(new Error(`Failed: ${error.message}`));
+        }
+    });
+}
+
+// ============ TELEGRAM BOT ============
+const bot = new Telegraf(BOT_TOKEN);
+
+const mainKeyboard = {
+    reply_markup: {
+        keyboard: [
+            ['STATUS', 'SCHEDULED', 'TARGET LATEST'],
+            ['SCHEDULE VIDEO', 'ZERO VIEWS', 'COOKIE STATUS'],
+            ['REFRESH', 'TEST VIDEO', 'HELP']
+        ],
+        resize_keyboard: true
+    }
+};
+
+bot.start(async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const count = await getPublicCount();
+    const cookieStatus = cookiesLoaded ? 'YES' : 'NO';
+    
+    await ctx.reply(
+        "YouTube Bot Active\n\n" +
+        "Your videos: " + count + "\n" +
+        "Scheduled: " + scheduled.length + "\n" +
+        "Watermark: " + WATERMARK_TEXT + "\n" +
+        "Cookies: " + cookieStatus + "\n" +
+        "Proxy: ACTIVE\n" +
+        "Monitor: EVERY 1 MINUTE\n\n" +
+        "Send a YouTube link OR use the buttons below!",
+        mainKeyboard
+    );
+});
+
+bot.hears('STATUS', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const count = await getPublicCount();
+    await ctx.reply(
+        "BOT STATUS\n\n" +
+        "Your videos: " + count + "\n" +
+        "Scheduled: " + scheduled.length + "\n" +
+        "Cookies: " + (cookiesLoaded ? 'Loaded' : 'Missing') + "\n" +
+        "Proxy: Active\n" +
+        "Monitor: Every 1 minute\n" +
+        "Checks: " + monitorCount + "\n" +
+        "Zero tracked: " + zeroViewVideos.size,
+        mainKeyboard
+    );
+});
+
+bot.hears('SCHEDULED', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    if (scheduled.length === 0) {
+        await ctx.reply("No scheduled videos\n\nSend a YouTube link to schedule one!", mainKeyboard);
+    } else {
+        let msg = "SCHEDULED VIDEOS (" + scheduled.length + ")\n\n";
+        scheduled.slice(0, 15).forEach((s, i) => {
+            msg += (i+1) + ". " + s.title.substring(0, 45) + "\n   Time: " + s.time.toLocaleString() + "\n\n";
+        });
+        await ctx.reply(msg, mainKeyboard);
+    }
+});
+
+bot.hears('TARGET LATEST', async (ctx) => {
+    const latest = await getLatestPost();
+    if (latest) {
+        await ctx.reply(
+            "Latest from " + TARGET_CHANNEL_HANDLE + "\n\n" +
+            "Title: " + latest.title + "\n" +
+            "Link: " + latest.url,
+            mainKeyboard
+        );
+    } else {
+        await ctx.reply("Could not fetch latest post from target channel.", mainKeyboard);
+    }
+});
+
+bot.hears('SCHEDULE VIDEO', async (ctx) => {
+    await ctx.reply(
+        "How to Schedule a Video\n\n" +
+        "Simply send me any YouTube link!\n\n" +
+        "Supported formats:\n" +
+        "- https://youtu.be/XXXXX\n" +
+        "- https://www.youtube.com/watch?v=XXXXX\n" +
+        "- https://youtube.com/shorts/XXXXX\n\n" +
+        "Watermark: " + WATERMARK_TEXT + "\n" +
+        "Schedule: 7 days from now",
+        mainKeyboard
+    );
+});
+
+bot.hears('ZERO VIEWS', async (ctx) => {
+    if (zeroViewVideos.size === 0) {
+        await ctx.reply("No Zero-View Videos detected.", mainKeyboard);
+    } else {
+        let msg = "ZERO-VIEW VIDEOS (" + zeroViewVideos.size + ")\n\n";
+        for (const [id, info] of zeroViewVideos) {
+            const age = Math.floor((Date.now() - info.age) / (60 * 60 * 1000));
+            msg += "Video: " + info.title.substring(0, 40) + "\n   " + age + " hours old\n\n";
+        }
+        await ctx.reply(msg, mainKeyboard);
+    }
+});
+
+bot.hears('COOKIE STATUS', async (ctx) => {
+    await ctx.reply(
+        "Cookie Status: " + (cookiesLoaded ? 'LOADED' : 'NOT LOADED') + "\n\n" +
+        (cookiesLoaded ? 
+            "Cookies are active! Proxy is also active to bypass blocks." : 
+            "Cookies not found. Add YT_COOKIES environment variable."),
+        mainKeyboard
+    );
+});
+
+bot.hears('REFRESH', async (ctx) => {
+    scheduledCache = null;
+    await ctx.reply("Data refreshed!", mainKeyboard);
+});
+
+bot.hears('TEST VIDEO', async (ctx) => {
+    await ctx.reply(
+        "Test Video\n\n" +
+        "Send this link to test the bot:\n\n" +
+        "https://youtu.be/dQw4w9WgXcQ",
+        mainKeyboard
+    );
+});
+
+bot.hears('HELP', async (ctx) => {
+    await ctx.reply(
+        "HELP\n\n" +
+        "STATUS - Bot status\n" +
+        "SCHEDULED - Your scheduled videos\n" +
+        "TARGET LATEST - Target channel latest\n" +
+        "SCHEDULE VIDEO - Send a YouTube link\n" +
+        "ZERO VIEWS - Check zero-view videos\n" +
+        "COOKIE STATUS - Check cookies\n" +
+        "REFRESH - Refresh data\n" +
+        "TEST VIDEO - Test with working link\n\n" +
+        "Quick Tip: Just send any YouTube link to schedule it!",
+        mainKeyboard
+    );
+});
+
+bot.on('text', async (ctx) => {
+    const text = ctx.message.text;
+    
+    const buttons = ['STATUS', 'SCHEDULED', 'TARGET LATEST', 'SCHEDULE VIDEO', 'ZERO VIEWS', 'COOKIE STATUS', 'REFRESH', 'TEST VIDEO', 'HELP'];
+    if (buttons.includes(text)) return;
+    if (text.startsWith('/')) return;
+    
+    const urlPattern = /(youtu\.be\/|youtube\.com\/watch\?v=|youtube\.com\/shorts\/)/i;
+    if (urlPattern.test(text)) {
+        let url = text;
+        if (url.includes(' ')) url = url.split(' ')[0];
+        
+        if (activeDownloads.has(ctx.chat.id)) {
+            await ctx.reply("Please wait, a download is already in progress!", mainKeyboard);
+            return;
+        }
+        
+        activeDownloads.set(ctx.chat.id, true);
+        
+        const statusMsg = await ctx.reply(
+            "Processing your video...\n\n" +
+            "Watermark: " + WATERMARK_TEXT + "\n" +
+            "Proxy: ACTIVE\n" +
+            "This may take a few minutes...",
+            mainKeyboard
+        );
+        
+        try {
+            const result = await downloadAndSchedule(url, ctx.chat.id, statusMsg.message_id);
+            await bot.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null,
+                "SUCCESS!\n\n" +
+                "Title: " + result.title.substring(0, 50) + "\n" +
+                "Scheduled for: " + result.scheduleDate.toLocaleString() + "\n" +
+                "Video ID: " + result.videoId
+            );
+        } catch (error) {
+            console.error('Error:', error.message);
+            await bot.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null,
+                "FAILED: " + error.message + "\n\nTry again later or use a different video."
+            );
+        } finally {
+            activeDownloads.delete(ctx.chat.id);
+        }
+        return;
+    }
+});
+
+bot.catch((err, ctx) => {
+    console.error('Bot error:', err);
+    ctx.reply("Error: " + err.message, mainKeyboard);
+});
+
+bot.launch();
+console.log('Bot started!');
+
+console.log(`\nYouTube Bot Initialized!`);
+console.log(`Watermark: "${WATERMARK_TEXT}"`);
+console.log(`Cookies: ${cookiesLoaded ? 'Loaded' : 'Missing'}`);
+console.log(`Proxy: ACTIVE (Rotating proxies)`);
+console.log(`Monitor interval: 1 MINUTE`);
+console.log(`Channel: ${YOUR_CHANNEL_ID}\n`);
+
+setTimeout(async () => {
+    const latest = await getLatestPost();
+    if (latest) {
+        console.log(`Latest target: ${latest.title}`);
+        lastVideoId = latest.id;
+    }
+    const scheduled = await getScheduledShorts();
+    console.log(`Scheduled videos: ${scheduled.length}`);
+}, 2000);
+
+setInterval(monitor, 60 * 1000);
+monitor();
+
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err.message);
+});
+
+console.log('Bot is ready! Use the keyboard buttons or send a YouTube link!');
