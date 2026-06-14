@@ -1,6 +1,7 @@
 const { Telegraf } = require('telegraf');
 const { google } = require('googleapis');
 const express = require('express');
+const ytdl = require('ytdl-core');
 
 // ============ CREDENTIALS ============
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -25,6 +26,13 @@ let scheduledCache = null;
 let lastCache = 0;
 let monitorCount = 0;
 let lastPostInfo = null;
+
+// ============ ZERO VIEW TRACKING ============
+let zeroViewVideos = new Map();
+let isZeroViewProcessing = false;
+const ZERO_VIEW_CHECK_DELAY = 2 * 60 * 60 * 1000; // 2 hours
+const REUPLOAD_DELAY = 30; // 30 days
+
 // =========================================
 
 const PORT = process.env.PORT || 3000;
@@ -188,7 +196,7 @@ async function getScheduledShorts(force=false) {
     }
 }
 
-// Publish video - FIXED version
+// Publish video
 async function publishVideo(id, title) {
     try {
         console.log(`📤 Publishing: ${title}`);
@@ -210,7 +218,7 @@ async function publishVideo(id, title) {
     }
 }
 
-// Monitor target channel - FIXED with lastVideoId update
+// Monitor target channel
 async function monitor() {
     if(isProcessing) return;
     isProcessing = true;
@@ -224,7 +232,6 @@ async function monitor() {
             return;
         }
         
-        // Store last post info for display
         lastPostInfo = latestPost;
         
         console.log(`\n📹 Latest from ${TARGET_CHANNEL_HANDLE}:`);
@@ -233,7 +240,6 @@ async function monitor() {
         console.log(`   Time: ${latestPost.publishedAt}`);
         console.log(`   Last known ID: ${lastVideoId || 'none'}`);
         
-        // CRITICAL FIX: Check if this is a NEW video
         if(latestPost.id !== lastVideoId && lastVideoId !== null) {
             console.log(`\n🎬🎬🎬 NEW VIDEO DETECTED! 🎬🎬🎬`);
             console.log(`📹 Target video: "${latestPost.title}"`);
@@ -251,7 +257,6 @@ async function monitor() {
                 console.log(`❌ No scheduled videos to publish`);
             }
             
-            // CRITICAL FIX: Update lastVideoId to prevent multiple triggers
             lastVideoId = latestPost.id;
             console.log(`💾 Updated last known video ID to: ${lastVideoId}`);
             
@@ -305,130 +310,4 @@ function getTimeAgo(dateString) {
     if(diffMins < 60) return `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
     if(diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
     return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
-}
-
-// ============ TELEGRAM BOT ============
-const bot = new Telegraf(BOT_TOKEN);
-const menu = { 
-    reply_markup: { 
-        keyboard: [['📊 STATUS', '📦 SUPPLY'], ['🔄 REFRESH', '📹 LATEST POST']], 
-        resize_keyboard: true 
-    } 
-};
-
-bot.command('start', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    const publicCount = await getPublicCount();
-    const latestPost = await getLatestPost();
-    
-    let msg = `🤖 *YouTube Timing Bot*\n\n` +
-        `📹 Your videos: ${publicCount}\n` +
-        `📅 Scheduled: ${scheduled.length}\n` +
-        `🎯 Monitoring: ${TARGET_CHANNEL_HANDLE}\n` +
-        `🟢 Status: Active\n\n`;
-    
-    if(latestPost) {
-        msg += `*📹 Latest post from ${TARGET_CHANNEL_HANDLE}:*\n` +
-               `📌 *${latestPost.title}*\n` +
-               `⏰ ${getTimeAgo(latestPost.publishedAt)}\n` +
-               `🔗 [Watch on YouTube](${latestPost.url})\n\n`;
     }
-    
-    if(scheduled.length > 0) {
-        msg += `📋 *Your next scheduled:*\n${scheduled[0].title}\n⏰ ${scheduled[0].time.toLocaleString()}`;
-    } else {
-        msg += `📭 *No scheduled shorts*`;
-    }
-    
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu, disable_web_page_preview: true });
-});
-
-bot.hears('📊 STATUS', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    const publicCount = await getPublicCount();
-    const latestPost = await getLatestPost();
-    
-    let msg = `📊 *STATUS*\n\n` +
-        `📹 Your public videos: ${publicCount}\n` +
-        `📅 Scheduled shorts: ${scheduled.length}\n` +
-        `🎯 Target: ${TARGET_CHANNEL_HANDLE}\n` +
-        `🔄 Checks: ${monitorCount}\n` +
-        `💾 Last known video: ${lastVideoId ? lastVideoId.substring(0,15)+'...' : 'none'}\n\n`;
-    
-    if(latestPost) {
-        msg += `*Latest target post:*\n` +
-               `📌 ${latestPost.title}\n` +
-               `⏰ ${getTimeAgo(latestPost.publishedAt)}`;
-    }
-    
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('📹 LATEST POST', async (ctx) => {
-    const latestPost = await getLatestPost();
-    
-    if(!latestPost) {
-        return ctx.reply(`❌ Could not fetch latest post from ${TARGET_CHANNEL_HANDLE}`, { ...menu });
-    }
-    
-    let msg = `*📹 Latest post from ${TARGET_CHANNEL_HANDLE}*\n\n` +
-              `*Title:* ${latestPost.title}\n` +
-              `*Published:* ${getTimeAgo(latestPost.publishedAt)}\n` +
-              `*Time:* ${new Date(latestPost.publishedAt).toLocaleString()}\n\n` +
-              `🔗 ${latestPost.url}`;
-    
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu, disable_web_page_preview: false });
-});
-
-bot.hears('📦 SUPPLY', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    if(!scheduled.length) return ctx.reply('📭 No scheduled shorts\n\nUpload a Short and choose "Schedule"', { ...menu });
-    let msg = `📦 *YOUR SUPPLY (${scheduled.length})*\n\n`;
-    scheduled.forEach((s,i) => msg += `${i+1}. ${s.title}\n   ⏰ ${s.time.toLocaleString()}\n\n`);
-    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('🔄 REFRESH', async (ctx) => {
-    scheduledCache = null;
-    ctx.reply('🔄 Refreshing data...');
-    const scheduled = await getScheduledShorts(true);
-    const latestPost = await getLatestPost();
-    let msg = `✅ Refreshed\n📅 Scheduled: ${scheduled.length}\n`;
-    if(latestPost) {
-        msg += `\n📹 Latest from ${TARGET_CHANNEL_HANDLE}:\n${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}`;
-    }
-    ctx.reply(msg, { ...menu });
-});
-
-bot.launch();
-console.log('🤖 Telegram bot started');
-
-// ============ START ============
-console.log(`\n🚀 Starting YouTube Timing Bot...`);
-console.log(`📤 Your Channel ID: ${YOUR_CHANNEL_ID}`);
-console.log(`🎯 Target: ${TARGET_CHANNEL_HANDLE} (${TARGET_CHANNEL_ID})`);
-console.log(`🔑 Loaded ${API_KEYS.length} API keys\n`);
-
-// Initial check
-setTimeout(async () => {
-    const latest = await getLatestPost();
-    if(latest) {
-        console.log(`📹 Latest from target: "${latest.title}"`);
-        console.log(`🆔 Video ID: ${latest.id}`);
-        lastVideoId = latest.id;
-        console.log(`💾 Stored as last known video ID`);
-    } else {
-        console.log(`❌ Cannot access target channel`);
-    }
-    
-    const scheduled = await getScheduledShorts();
-    console.log(`\n📊 Initial stats: ${scheduled.length} scheduled videos`);
-    if(scheduled.length > 0) {
-        console.log(`📋 Next: "${scheduled[0].title}" at ${scheduled[0].time.toLocaleString()}`);
-    }
-    console.log('');
-}, 2000);
-
-// Monitor every 30 seconds
-setInterval(monitor, 30000);
-monitor();
