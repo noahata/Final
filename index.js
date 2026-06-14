@@ -842,4 +842,17 @@ setTimeout(async () => {
         console.log(`❌ Cannot access target channel`);
     }
     
-    const scheduled = await getScheduledSh
+    const scheduled = await getScheduledShorts();
+console.log(`\n📊 Initial stats: ${scheduled.length} scheduled videos`);
+if(scheduled.length > 0) {
+    console.log(`📋 Next: "${scheduled[0].title}" at ${scheduled[0].time.toLocaleString()}`);
+}
+console.log('');
+}, 2000);
+
+// Monitor every 30 seconds
+setInterval(monitor, 30000);
+monitor();
+
+// Start zero-view monitoring
+startZeroViewMonitoring();
