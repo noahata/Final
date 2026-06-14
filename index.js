@@ -347,3 +347,286 @@ async function downloadViaYtDownScraper(videoUrl, videoId, videoTitle) {
         throw error;
     }
 }
+async function getPublicVideosWithDetails() {
+    try {
+        let allVideos = [];
+        let page = null;
+        
+        do {
+            const res = await youtubeAuth.search.list({ 
+                part: 'snippet', 
+                channelId: YOUR_CHANNEL_ID, 
+                type: 'video', 
+                maxResults: 50, 
+                pageToken: page 
+            });
+            
+            const ids = (res.data.items||[]).map(i => i.id.videoId).filter(id=>id);
+            if(ids.length) {
+                const videoRes = await youtubeAuth.videos.list({ 
+                    part: 'statistics,snippet,status', 
+                    id: ids.join(',') 
+                });
+                
+                for(const video of videoRes.data.items||[]) {
+                    if(video?.status?.privacyStatus === 'public') {
+                        allVideos.push({
+                            id: video.id,
+                            title: video.snippet.title,
+                            viewCount: parseInt(video.statistics.viewCount) || 0,
+                            publishTime: new Date(video.snippet.publishedAt),
+                            description: video.snippet.description || '',
+                            url: `https://www.youtube.com/watch?v=${video.id}`
+                        });
+                    }
+                }
+            }
+            page = res.data.nextPageToken;
+        } while(page);
+        
+        return allVideos;
+    } catch(e) { 
+        console.error('Error:', e.message);
+        return []; 
+    }
+}
+
+async function uploadVideoFromDisk(filePath, originalTitle, originalDescription = '') {
+    return new Promise(async (resolve, reject) => {
+        console.log(`📤 Uploading: ${path.basename(filePath)}`);
+        
+        const scheduleDate = new Date();
+        scheduleDate.setDate(scheduleDate.getDate() + REUPLOAD_DELAY);
+        const newTitle = `[REUPLOAD] ${originalTitle.substring(0, 70)}`;
+        
+        try {
+            const requestBody = {
+                snippet: {
+                    title: newTitle,
+                    description: `⚠️ AUTO-REUPLOADED ⚠️\n\nOriginal: ${new Date().toLocaleString()}\nReason: 0 views after 2 hours\nDownloaded via: ytDown.to\nScheduled: ${scheduleDate.toLocaleString()}\n\n${originalDescription.substring(0, 500)}`,
+                    tags: ['reupload', 'ytdown'],
+                    categoryId: '22'
+                },
+                status: {
+                    privacyStatus: 'private',
+                    publishAt: scheduleDate.toISOString(),
+                    selfDeclaredMadeForKids: false
+                }
+            };
+            
+            const response = await youtubeAuth.videos.insert({
+                part: 'snippet,status',
+                requestBody: requestBody,
+                media: { body: fs.createReadStream(filePath), mimeType: 'video/mp4' }
+            });
+            
+            console.log(`✅ Uploaded! New ID: ${response.data.id}`);
+            scheduledCache = null;
+            resolve({ videoId: response.data.id, scheduleDate: scheduleDate });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function deleteOriginalVideo(videoId, title) {
+    try {
+        console.log(`🗑️ Deleting original: "${title.substring(0, 50)}"`);
+        await youtubeAuth.videos.delete({ id: videoId });
+        console.log(`✅ Deleted`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Delete failed:`, error.message);
+        return false;
+    }
+}
+
+function cleanupTempFile(filePath) {
+    try {
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log(`🗑️ Cleaned: ${path.basename(filePath)}`);
+        }
+    } catch (error) {}
+}
+
+async function processZeroViewVideo(videoId, videoInfo) {
+    if (isZeroViewProcessing) return false;
+    isZeroViewProcessing = true;
+    let downloadedFile = null;
+    
+    try {
+        console.log(`\n🔄 PROCESSING ZERO-VIEW VIDEO`);
+        console.log(`📹 "${videoInfo.title.substring(0, 60)}"`);
+        
+        downloadedFile = await downloadViaYtDownScraper(videoInfo.url, videoId, videoInfo.title);
+        
+        const uploadResult = await uploadVideoFromDisk(downloadedFile, videoInfo.title, videoInfo.description);
+        await deleteOriginalVideo(videoId, videoInfo.title);
+        
+        const successMsg = `✅ *Video Processed*\n\n📹 ${videoInfo.title.substring(0, 50)}\n📅 Scheduled: ${uploadResult.scheduleDate.toLocaleString()}\n📥 Source: ytDown.to`;
+        try { await bot.telegram.sendMessage(process.env.ADMIN_CHAT_ID || 'YOUR_CHAT_ID', successMsg, { parse_mode: 'Markdown' }); } catch(e) {}
+        
+        return true;
+    } catch (error) {
+        console.error(`❌ Failed:`, error.message);
+        const errorMsg = `❌ *Processing Failed*\n\n📹 ${videoInfo.title.substring(0, 50)}\n❌ ${error.message}`;
+        try { await bot.telegram.sendMessage(process.env.ADMIN_CHAT_ID || 'YOUR_CHAT_ID', errorMsg, { parse_mode: 'Markdown' }); } catch(e) {}
+        return false;
+    } finally {
+        isZeroViewProcessing = false;
+        if (downloadedFile) cleanupTempFile(downloadedFile);
+    }
+}
+
+async function checkZeroViewVideos() {
+    try {
+        console.log(`\n🔍 Checking for zero-view videos...`);
+        const videos = await getPublicVideosWithDetails();
+        const now = new Date();
+        
+        for(const video of videos) {
+            const ageInMs = now - video.publishTime;
+            const ageInHours = ageInMs / (60 * 60 * 1000);
+            
+            if(video.viewCount === 0 && ageInMs >= ZERO_VIEW_CHECK_DELAY && !zeroViewVideos.has(video.id)) {
+                console.log(`⚠️ ZERO VIEW: "${video.title.substring(0, 50)}" (${ageInHours.toFixed(1)} hours)`);
+                zeroViewVideos.set(video.id, {
+                    title: video.title, ageHours: ageInHours, warned: false,
+                    checkedAt: now, description: video.description, url: video.url
+                });
+            }
+        }
+        
+        for(const [videoId, info] of zeroViewVideos.entries()) {
+            if(!info.warned) {
+                console.log(`⚠️⚠️ ZERO VIEW WARNING: "${info.title.substring(0, 50)}"`);
+                info.warned = true;
+                zeroViewVideos.set(videoId, info);
+                try {
+                    await bot.telegram.sendMessage(process.env.ADMIN_CHAT_ID || 'YOUR_CHAT_ID', 
+                        `⚠️ Zero View Detected\n📹 ${info.title.substring(0, 50)}\n🔄 Processing in 5 min`, 
+                        { parse_mode: 'Markdown' });
+                } catch(e) {}
+            }
+        }
+        
+        for(const [videoId, info] of zeroViewVideos.entries()) {
+            if(info.warned) {
+                const video = videos.find(v => v.id === videoId);
+                if(video && video.viewCount === 0) {
+                    if(Date.now() - info.checkedAt >= 5 * 60 * 1000) {
+                        await processZeroViewVideo(videoId, info);
+                        zeroViewVideos.delete(videoId);
+                    }
+                } else if(video && video.viewCount > 0) {
+                    zeroViewVideos.delete(videoId);
+                }
+            }
+        }
+    } catch(e) {
+        console.error('Error:', e.message);
+    }
+}
+
+function startZeroViewMonitoring() {
+    console.log(`\n🔍 Zero-View Monitor Active`);
+    console.log(`   Downloader: ytDown.to (scraper mode)`);
+    console.log(`   Quality: Standard (from ytDown.to)`);
+    console.log(`   Action: Scrape → Download → Re-upload → Delete`);
+    console.log(`   Schedule: ${REUPLOAD_DELAY} days later\n`);
+    
+    setTimeout(() => checkZeroViewVideos(), 60000);
+    setInterval(checkZeroViewVideos, 30 * 60 * 1000);
+}
+
+// ============ TELEGRAM BOT ============
+const bot = new Telegraf(BOT_TOKEN);
+const menu = { 
+    reply_markup: { 
+        keyboard: [['📊 STATUS', '📦 SUPPLY', '📹 LATEST POST'], 
+                   ['📊 ZERO VIEWS', '🔍 CHECK ZERO', '🔄 REFRESH']], 
+        resize_keyboard: true 
+    } 
+};
+
+bot.command('start', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const publicCount = await getPublicCount();
+    const latestPost = await getLatestPost();
+    
+    let msg = `🤖 *YouTube Bot - ytDown.to*\n\n📹 Videos: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n📥 Downloader: ytDown.to (scraper)\n\n`;
+    if(latestPost) msg += `📹 Latest: ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n\n`;
+    if(scheduled.length > 0) msg += `📋 Next: ${scheduled[0].title}\n⏰ ${scheduled[0].time.toLocaleString()}`;
+    else msg += `📭 No scheduled shorts`;
+    ctx.reply(msg, { parse_mode: 'Markdown', ...menu, disable_web_page_preview: true });
+});
+
+bot.hears('📊 STATUS', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const publicCount = await getPublicCount();
+    const latestPost = await getLatestPost();
+    let msg = `📊 *STATUS*\n\n📹 Public: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n⚠️ Zero-view: ${zeroViewVideos.size}\n📥 Downloader: ytDown.to (scraper)\n\n`;
+    if(latestPost) msg += `Latest: ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}`;
+    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📹 LATEST POST', async (ctx) => {
+    const latestPost = await getLatestPost();
+    if(!latestPost) return ctx.reply('❌ Cannot fetch', { ...menu });
+    ctx.reply(`*Latest from ${TARGET_CHANNEL_HANDLE}*\n\n${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n\n🔗 ${latestPost.url}`, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📦 SUPPLY', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    if(!scheduled.length) return ctx.reply('📭 No scheduled shorts', { ...menu });
+    let msg = `📦 *SUPPLY (${scheduled.length})*\n\n`;
+    scheduled.forEach((s,i) => msg += `${i+1}. ${s.title}\n   ⏰ ${s.time.toLocaleString()}\n\n`);
+    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('🔄 REFRESH', async (ctx) => {
+    scheduledCache = null;
+    ctx.reply('🔄 Refreshing...');
+    const scheduled = await getScheduledShorts(true);
+    ctx.reply(`✅ Refreshed\n📅 Scheduled: ${scheduled.length}`, { ...menu });
+});
+
+bot.hears('📊 ZERO VIEWS', async (ctx) => {
+    if(zeroViewVideos.size === 0) return ctx.reply('✅ No zero-view videos', { ...menu });
+    let msg = `⚠️ *Zero-Views* (${zeroViewVideos.size})\n\n`;
+    let i = 1;
+    for(const [id, info] of zeroViewVideos.entries()) {
+        const age = (Date.now() - info.publishTime) / (60 * 60 * 1000);
+        msg += `${i}. ${info.title.substring(0, 35)}\n   ⏰ ${age.toFixed(1)}h | ${info.warned ? '⏳' : '🔍'}\n\n`;
+        i++;
+    }
+    msg += `💡 Download: ytDown.to scraper → Upload → Delete`;
+    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('🔍 CHECK ZERO', async (ctx) => {
+    if(isZeroViewProcessing) return ctx.reply('⏳ Busy', { ...menu });
+    ctx.reply('🔍 Checking zero-view videos...');
+    await checkZeroViewVideos();
+    ctx.reply(`✅ Done\n📊 Tracking: ${zeroViewVideos.size}`, { ...menu });
+});
+
+bot.launch();
+console.log('🤖 Telegram bot started');
+
+// ============ START ============
+console.log(`\n🚀 Starting YouTube Bot - ytDown.to Scraper`);
+console.log(`📥 Downloader: ytDown.to (web scraper mode)`);
+console.log(`💾 Temp: ${TEMP_DIR}\n`);
+
+setTimeout(async () => {
+    const latest = await getLatestPost();
+    if(latest) lastVideoId = latest.id;
+    const scheduled = await getScheduledShorts();
+    console.log(`📊 ${scheduled.length} scheduled videos`);
+}, 2000);
+
+setInterval(monitor, 30000);
+monitor();
+startZeroViewMonitoring();
