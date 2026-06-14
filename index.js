@@ -856,6 +856,62 @@ bot.on('text', async (ctx) => {
         try {
             const result = await downloadAndSchedule(url, ctx.chat.id, statusMsg.message_id);
             await bot.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null,
-                `✅ *SUCCESS!*\n\n` +
+                                `✅ *SUCCESS!*\n\n` +
                 `📹 ${result.title.substring(0, 50)}\n` +
+                `📅 Scheduled for: ${result.scheduleDate.toLocaleString()}\n` +
+                `🆔 \`${result.videoId}\``,
+                { parse_mode: 'Markdown' }
+            );
+        } catch (error) {
+            console.error('Error:', error.message);
+            await bot.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null,
+                `❌ *FAILED:* ${error.message}`,
+                { parse_mode: 'Markdown' }
+            );
+        } finally {
+            activeDownloads.delete(ctx.chat.id);
+        }
+        return;
+    }
+});
+
+// Error handler
+bot.catch((err, ctx) => {
+    console.error('Bot error:', err);
+    ctx.reply(`❌ Error: ${err.message}`, { ...mainKeyboard });
+});
+
+// Launch bot
+bot.launch();
+console.log('🤖 Bot started!');
+
+// ============ INITIALIZE ============
+console.log(`\n🚀 YouTube Bot Initialized!`);
+console.log(`🏷️ Watermark: "${WATERMARK_TEXT}"`);
+console.log(`🍪 Cookies: ${cookiesLoaded ? '✅ Loaded' : '❌ Missing'}`);
+console.log(`🚦 Rate Limit Protection: ACTIVE (5s delay)`);
+console.log(`⏱️ Monitor interval: 1 MINUTE`);
+console.log(`📊 Max requests per minute: 10`);
+console.log(`📤 Channel: ${YOUR_CHANNEL_ID}\n`);
+
+setTimeout(async () => {
+    const latest = await getLatestPost();
+    if (latest) {
+        console.log(`📹 Latest target: ${latest.title}`);
+        lastVideoId = latest.id;
+    }
+    const scheduled = await getScheduledShorts();
+    console.log(`📊 Scheduled videos: ${scheduled.length}`);
+}, 2000);
+
+// Monitor EVERY 1 MINUTE (60,000 ms)
+setInterval(monitor, 60 * 1000);
+monitor();
+startZeroMonitoring();
+
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err.message);
+});
+
+console.log('✅ Bot is ready! Use the keyboard buttons or send a YouTube link!');
                 
