@@ -302,3 +302,291 @@ async function addWatermarkToVideo(inputPath, outputPath) {
             .run();
     });
     }
+// ============ FEATURE 1: SCHEDULE BY LINK ============
+
+async function downloadVideoFromUrl(url, chatId, messageId, scheduleDays = 7) {
+    return new Promise(async (resolve, reject) => {
+        const videoId = extractVideoId(url);
+        if (!videoId) {
+            reject(new Error('Invalid YouTube URL'));
+            return;
+        }
+        
+        try {
+            const info = await ytdl.getInfo(url);
+            const videoTitle = info.videoDetails.title;
+            const timestamp = Date.now();
+            const tempPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_temp.mp4`);
+            const watermarkedPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_watermarked.mp4`);
+            
+            const format = ytdl.chooseFormat(info.formats, { quality: 'lowest', filter: 'audioandvideo' });
+            if (!format) throw new Error('No suitable format found');
+            
+            const totalSize = parseInt(format.contentLength) || 0;
+            const startTime = Date.now();
+            let downloaded = 0;
+            let lastUpdate = 0;
+            
+            const writeStream = fs.createWriteStream(tempPath);
+            const downloadStream = ytdl(url, { format: format });
+            
+            downloadStream.on('progress', async (chunkLength, downloadedBytes, totalBytes) => {
+                downloaded = downloadedBytes;
+                const now = Date.now();
+                if (now - lastUpdate > 3000 && totalBytes) {
+                    lastUpdate = now;
+                    const elapsed = (now - startTime) / 1000;
+                    const speed = downloaded / elapsed;
+                    const remainingBytes = totalBytes - downloaded;
+                    const timeRemaining = speed > 0 ? remainingBytes / speed : 0;
+                    const percent = (downloaded / totalBytes) * 100;
+                    const barLength = 20;
+                    const filled = Math.floor(barLength * percent / 100);
+                    const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
+                    
+                    const progressMsg = 
+                        `📥 **Downloading...**\n\n` +
+                        `\`\`\`\n${bar} ${percent.toFixed(1)}%\n\`\`\`\n` +
+                        `📦 ${formatFileSize(downloaded)} / ${formatFileSize(totalBytes)}\n` +
+                        `⚡ ${formatSpeed(speed)} | ⏱️ ${Math.ceil(timeRemaining)}s left`;
+                    
+                    try {
+                        await bot.telegram.editMessageText(chatId, messageId, null, progressMsg, { parse_mode: 'Markdown' });
+                    } catch (e) {}
+                }
+            });
+            
+            downloadStream.pipe(writeStream);
+            
+            writeStream.on('finish', async () => {
+                console.log(`✅ Download complete: ${videoTitle}`);
+                await bot.telegram.editMessageText(chatId, messageId, null, `✅ **Download complete!**\n\n🎨 **Adding watermark...**`, { parse_mode: 'Markdown' });
+                
+                await addWatermarkToVideo(tempPath, watermarkedPath);
+                fs.unlinkSync(tempPath);
+                resolve({ filePath: watermarkedPath, title: videoTitle, description: info.videoDetails.description || '' });
+            });
+            
+            writeStream.on('error', reject);
+            downloadStream.on('error', reject);
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function uploadAndScheduleVideo(filePath, originalTitle, originalDescription, chatId, messageId, scheduleDays = 7) {
+    return new Promise(async (resolve, reject) => {
+        const scheduleDate = new Date();
+        scheduleDate.setDate(scheduleDate.getDate() + scheduleDays);
+        const newTitle = `[SCHEDULED] ${originalTitle.substring(0, 80)}`;
+        
+        await bot.telegram.editMessageText(chatId, messageId, null,
+            `📤 **Uploading to YouTube...**\n📅 Scheduled for: ${scheduleDate.toLocaleString()}`,
+            { parse_mode: 'Markdown' }
+        );
+        
+        try {
+            const requestBody = {
+                snippet: {
+                    title: newTitle,
+                    description: `📥 Scheduled via Bot\n🏷️ Watermark: ${WATERMARK_TEXT}\n📅 Scheduled: ${scheduleDate.toLocaleString()}\n\n${originalDescription.substring(0, 500)}`,
+                    tags: ['scheduled', 'watermark'],
+                    categoryId: '22'
+                },
+                status: {
+                    privacyStatus: 'private',
+                    publishAt: scheduleDate.toISOString(),
+                    selfDeclaredMadeForKids: false
+                }
+            };
+            
+            const response = await youtubeAuth.videos.insert({
+                part: 'snippet,status',
+                requestBody: requestBody,
+                media: { body: fs.createReadStream(filePath), mimeType: 'video/mp4' }
+            });
+            
+            console.log(`✅ Upload complete! Video ID: ${response.data.id}`);
+            scheduledCache = null;
+            resolve({ videoId: response.data.id, scheduleDate: scheduleDate });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function handleScheduleByLink(ctx, url) {
+    if (activeDownloads.has(ctx.chat.id)) {
+        await ctx.reply(`⏳ Please wait! A download is in progress.`);
+        return;
+    }
+    
+    activeDownloads.set(ctx.chat.id, true);
+    const progressMsg = await ctx.reply(`🎬 **Processing your video...**\n\n🏷️ Watermark: ${WATERMARK_TEXT}\n⏳ Starting download...`);
+    let downloadedFile = null;
+    
+    try {
+        const downloadResult = await downloadVideoFromUrl(url, ctx.chat.id, progressMsg.message_id, 7);
+        downloadedFile = downloadResult.filePath;
+        const uploadResult = await uploadAndScheduleVideo(downloadedFile, downloadResult.title, downloadResult.description, ctx.chat.id, progressMsg.message_id, 7);
+        
+        await bot.telegram.editMessageText(ctx.chat.id, progressMsg.message_id, null,
+            `✅ **VIDEO SCHEDULED SUCCESSFULLY!**\n\n` +
+            `📹 **${downloadResult.title.substring(0, 50)}**\n` +
+            `🏷️ Watermark: ${WATERMARK_TEXT}\n` +
+            `📅 Scheduled: ${uploadResult.scheduleDate.toLocaleString()}\n\n` +
+            `🆔 Video ID: \`${uploadResult.videoId}\``,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (error) {
+        console.error('Error:', error.message);
+        await bot.telegram.editMessageText(ctx.chat.id, progressMsg.message_id, null,
+            `❌ **FAILED:** ${error.message}`,
+            { parse_mode: 'Markdown' }
+        );
+    } finally {
+        activeDownloads.delete(ctx.chat.id);
+        if (downloadedFile) {
+            setTimeout(() => { try { if (fs.existsSync(downloadedFile)) fs.unlinkSync(downloadedFile); } catch(e) {} }, 5000);
+        }
+    }
+}
+
+// ============ FEATURE 2: AUTO ZERO-VIEWS ============
+
+async function getPublicVideosWithDetails() {
+    try {
+        let allVideos = [], page = null;
+        do {
+            const res = await youtubeAuth.search.list({ part: 'snippet', channelId: YOUR_CHANNEL_ID, type: 'video', maxResults: 50, pageToken: page });
+            const ids = (res.data.items||[]).map(i => i.id.videoId).filter(id=>id);
+            if(ids.length) {
+                const videoRes = await youtubeAuth.videos.list({ part: 'statistics,snippet,status', id: ids.join(',') });
+                for(const video of videoRes.data.items||[]) {
+                    if(video?.status?.privacyStatus === 'public') {
+                        allVideos.push({
+                            id: video.id,
+                            title: video.snippet.title,
+                            viewCount: parseInt(video.statistics.viewCount) || 0,
+                            publishTime: new Date(video.snippet.publishedAt),
+                            description: video.snippet.description || ''
+                        });
+                    }
+                }
+            }
+            page = res.data.nextPageToken;
+        } while(page);
+        return allVideos;
+    } catch(e) { 
+        console.error('Error:', e.message);
+        return []; 
+    }
+}
+
+async function downloadZeroViewVideo(videoId, videoTitle, chatId, messageId) {
+    return new Promise(async (resolve, reject) => {
+        const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        const timestamp = Date.now();
+        const outputPath = path.join(TEMP_DIR, `${videoId}_${timestamp}_zero.mp4`);
+        
+        try {
+            const info = await ytdl.getInfo(videoUrl);
+            const format = ytdl.chooseFormat(info.formats, { quality: 'lowest', filter: 'audioandvideo' });
+            if (!format) throw new Error('No suitable format found');
+            
+            const totalSize = parseInt(format.contentLength) || 0;
+            const startTime = Date.now();
+            let downloaded = 0;
+            let lastUpdate = 0;
+            
+            const writeStream = fs.createWriteStream(outputPath);
+            const downloadStream = ytdl(videoUrl, { format: format });
+            
+            downloadStream.on('progress', async (chunkLength, downloadedBytes, totalBytes) => {
+                downloaded = downloadedBytes;
+                const now = Date.now();
+                if (now - lastUpdate > 3000 && totalBytes) {
+                    lastUpdate = now;
+                    const elapsed = (now - startTime) / 1000;
+                    const speed = downloaded / elapsed;
+                    const remainingBytes = totalBytes - downloaded;
+                    const timeRemaining = speed > 0 ? remainingBytes / speed : 0;
+                    const percent = (downloaded / totalBytes) * 100;
+                    const barLength = 20;
+                    const filled = Math.floor(barLength * percent / 100);
+                    const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
+                    
+                    const progressMsg = 
+                        `⚠️ **Re-uploading zero-view video...**\n\n` +
+                        `\`\`\`\n${bar} ${percent.toFixed(1)}%\n\`\`\`\n` +
+                        `📦 ${formatFileSize(downloaded)} / ${formatFileSize(totalBytes)}\n` +
+                        `⚡ ${formatSpeed(speed)} | ⏱️ ${Math.ceil(timeRemaining)}s left`;
+                    
+                    try {
+                        await bot.telegram.editMessageText(chatId, messageId, null, progressMsg, { parse_mode: 'Markdown' });
+                    } catch (e) {}
+                }
+            });
+            
+            downloadStream.pipe(writeStream);
+            writeStream.on('finish', () => resolve(outputPath));
+            writeStream.on('error', reject);
+            downloadStream.on('error', reject);
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function reuploadZeroViewVideo(filePath, originalTitle, originalDescription, chatId, messageId) {
+    return new Promise(async (resolve, reject) => {
+        const scheduleDate = new Date();
+        scheduleDate.setDate(scheduleDate.getDate() + REUPLOAD_DELAY);
+        const newTitle = `[REUPLOAD] ${originalTitle.substring(0, 80)}`;
+        
+        await bot.telegram.editMessageText(chatId, messageId, null,
+            `📤 **Re-uploading to YouTube...**\n📅 New schedule: ${scheduleDate.toLocaleString()}`,
+            { parse_mode: 'Markdown' }
+        );
+        
+        try {
+            const requestBody = {
+                snippet: {
+                    title: newTitle,
+                    description: `⚠️ AUTO-REUPLOADED (0 views after 2 hours)\nNew schedule: ${scheduleDate.toLocaleString()}\n\n${originalDescription.substring(0, 500)}`,
+                    tags: ['reupload', 'zero-views'],
+                    categoryId: '22'
+                },
+                status: {
+                    privacyStatus: 'private',
+                    publishAt: scheduleDate.toISOString(),
+                    selfDeclaredMadeForKids: false
+                }
+            };
+            
+            const response = await youtubeAuth.videos.insert({
+                part: 'snippet,status',
+                requestBody: requestBody,
+                media: { body: fs.createReadStream(filePath), mimeType: 'video/mp4' }
+            });
+            
+            scheduledCache = null;
+            resolve({ videoId: response.data.id, scheduleDate: scheduleDate });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function deleteOriginalVideo(videoId, title) {
+    try {
+        console.log(`🗑️ Deleting original: ${title.substring(0, 50)}`);
+        await youtubeAuth.videos.delete({ id: videoId });
+        console.log(`✅ Deleted`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Delete failed:`, error.message);
+        return false;
+    }
+        }
