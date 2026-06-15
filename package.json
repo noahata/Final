@@ -7,8 +7,6 @@
   "dependencies": {
     "telegraf": "latest",
     "googleapis": "latest",
-    "express": "latest",
-    "puppeteer-extra": "latest",
-    "puppeteer-extra-plugin-stealth": "latest"
+    "express": "latest"
   }
 }
