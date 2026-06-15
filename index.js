@@ -1,4 +1,4 @@
-const Telegraf = require('telegraf');
+const { Telegraf } = require('telegraf');
 const google = require('googleapis');
 const express = require('express');
 const axios = require('axios');
