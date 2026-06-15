@@ -9,7 +9,6 @@
     "googleapis": "latest",
     "express": "latest",
     "puppeteer-extra": "latest",
-    "puppeteer-extra-plugin-stealth": "latest",
-    "random-useragent": "latest"
+    "puppeteer-extra-plugin-stealth": "latest"
   }
 }
