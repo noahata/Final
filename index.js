@@ -320,3 +320,145 @@ async function monitor() {
         isProcessing = false; 
     }
 }
+let publicCountCache = { count: 0, timestamp: 0 };
+async function getPublicCount() {
+    const now = Date.now();
+    if(now - publicCountCache.timestamp < 300000) return publicCountCache.count;
+    try {
+        let count = 0, page = null;
+        do {
+            const res = await youtubeAuth.search.list({ part: 'snippet', channelId: YOUR_CHANNEL_ID, type: 'video', maxResults: 50, pageToken: page });
+            const ids = (res.data.items || []).map(i => i.id.videoId).filter(id => id);
+            if(ids.length) {
+                const videos = await youtubeAuth.videos.list({ part: 'status', id: ids.join(',') });
+                count += (videos.data.items || []).filter(v => v?.status?.privacyStatus === 'public').length;
+            }
+            page = res.data.nextPageToken;
+        } while(page);
+        publicCountCache = { count, timestamp: now };
+        return count;
+    } catch(e) { return publicCountCache.count; }
+}
+
+function getTimeAgo(dateString) {
+    const date = new Date(dateString);
+    const diffMins = Math.floor((Date.now() - date) / 60000);
+    if(diffMins < 1) return 'Just now';
+    if(diffMins < 60) return `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if(diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+}
+
+const bot = new Telegraf(BOT_TOKEN);
+const menu = { 
+    reply_markup: { 
+        keyboard: [['📊 STATUS', '📦 SUPPLY'], ['🔄 REFRESH', '📹 LATEST POST'], ['📈 VIEW STATUS', '🔍 SCAN ALL']], 
+        resize_keyboard: true 
+    } 
+};
+
+bot.catch((err, ctx) => {
+    console.error('Telegram error:', err);
+    ctx.reply('⚠️ Error occurred. Please try again.');
+});
+
+bot.command('start', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const publicCount = await getPublicCount();
+    const latestPost = await getLatestPost();
+    let msg = `🤖 *YouTube Timing Bot*\n\n📹 Videos: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n🟢 Active\n📊 Monitoring: ${publishedVideos.size}\n\n`;
+    if(latestPost) msg += `*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n\n`;
+    if(scheduled.length > 0) msg += `📋 *Next:* ${scheduled[0].title}\n⏰ ${scheduled[0].time.toLocaleString()}`;
+    else msg += `📭 No scheduled shorts`;
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📊 STATUS', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const publicCount = await getPublicCount();
+    const latestPost = await getLatestPost();
+    let msg = `📊 *STATUS*\n\n📹 Public: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n🔄 Checks: ${monitorCount}\n📊 Monitoring: ${publishedVideos.size}\n⚠️ Errors: ${consecutiveErrors}\n`;
+    if(latestPost) msg += `\n*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}`;
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📈 VIEW STATUS', async (ctx) => {
+    if (publishedVideos.size === 0) return ctx.reply('📭 No videos being monitored', menu);
+    let msg = `📈 *RECENT VIDEO VIEW STATUS*\n\n`;
+    for (const [id, data] of publishedVideos.entries()) {
+        const hoursAgo = ((Date.now() - data.publishTime) / (1000 * 60 * 60)).toFixed(1);
+        const emoji = data.status === 'checking' ? '⏳' : data.status === 'success' ? '✅' : '🔄';
+        msg += `${emoji} *${data.title.substring(0, 30)}*\n   ⏰ ${hoursAgo} hours ago\n   📊 Status: ${data.status}\n`;
+        if (data.viewCount) msg += `   👁️ Views: ${data.viewCount}\n`;
+        msg += `\n`;
+    }
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+// NEW: Scan ALL videos button
+bot.hears('🔍 SCAN ALL', async (ctx) => {
+    await ctx.reply('🔍 Starting full channel scan for videos with less than 2 views...\n\nThis may take a few minutes depending on how many videos you have.');
+    
+    try {
+        await scanAllVideosForLowViews();
+        await ctx.reply('✅ Scan complete! Checked all your videos.\n\nVideos with less than 2 views have been rescheduled for +3 days.');
+        
+        // Refresh cache
+        scheduledCache = null;
+        const scheduled = await getScheduledShorts(true);
+        await ctx.reply(`📊 Updated supply: ${scheduled.length} scheduled videos`, menu);
+        
+    } catch (error) {
+        await ctx.reply(`❌ Scan failed: ${error.message}`);
+    }
+});
+
+bot.hears('📹 LATEST POST', async (ctx) => {
+    const latestPost = await getLatestPost();
+    if(!latestPost) return ctx.reply('❌ No post', menu);
+    await ctx.reply(`*Latest from ${TARGET_CHANNEL_HANDLE}:*\n\n*${latestPost.title}*\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n🔗 ${latestPost.url}`, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📦 SUPPLY', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    if(!scheduled.length) return ctx.reply('📭 No scheduled shorts\n\nUpload a Short and choose "Schedule"', menu);
+    let msg = `📦 *YOUR SUPPLY (${scheduled.length})*\n\n`;
+    scheduled.slice(0, 10).forEach((s,i) => msg += `${i+1}. ${s.title.substring(0, 40)}\n   ⏰ ${s.time.toLocaleString()}\n\n`);
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('🔄 REFRESH', async (ctx) => {
+    scheduledCache = null;
+    await ctx.reply('🔄 Refreshing data...');
+    const scheduled = await getScheduledShorts(true);
+    await ctx.reply(`✅ Refreshed\n📅 Scheduled: ${scheduled.length}`, menu);
+});
+
+process.on('SIGINT', () => {
+    console.log('Shutting down...');
+    bot.stop('SIGINT');
+    process.exit();
+});
+
+bot.launch();
+console.log('🤖 Bot started');
+
+// Run initial scan on startup
+setTimeout(async () => {
+    console.log('\n📋 Running initial scan for old videos...');
+    await scanAllVideosForLowViews();
+    
+    const latest = await getLatestPost();
+    if(latest) { lastVideoId = latest.id; console.log(`📹 Initial ID: ${latest.id}`); }
+}, 5000);
+
+setInterval(monitor, 30000);
+monitor();
+
+// Run full scan every 24 hours
+setInterval(async () => {
+    console.log('\n📋 Running scheduled 24-hour scan...');
+    await scanAllVideosForLowViews();
+}, 24 * 60 * 60 * 1000);
