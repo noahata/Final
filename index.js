@@ -286,3 +286,215 @@ async function getScheduledShorts(force = false) {
         return scheduled;
     } catch(e) { return []; }
                                             }
+async function publishVideo(id, title, retryCount = 0) {
+    try {
+        console.log(`📤 Publishing: ${title}`);
+        await youtubeAuth.videos.update({ part: 'status', requestBody: { id: id, status: { privacyStatus: 'public' } } });
+        console.log(`✅ Published: ${title}`);
+        publishedVideos.set(id, { publishTime: Date.now(), title: title, status: 'checking' });
+        scheduledCache = null;
+        consecutiveErrors = 0;
+        return true;
+    } catch(e) {
+        if(retryCount < 3) {
+            await new Promise(r => setTimeout(r, 10000));
+            return publishVideo(id, title, retryCount + 1);
+        }
+        return false;
+    }
+}
+
+async function makePrivateAndReschedule(videoId, title) {
+    try {
+        const newPublishDate = new Date();
+        newPublishDate.setDate(newPublishDate.getDate() + 3);
+        await youtubeAuth.videos.update({
+            part: 'status',
+            requestBody: { id: videoId, status: { privacyStatus: 'private', publishAt: newPublishDate.toISOString() } }
+        });
+        console.log(`✅ "${title}" rescheduled`);
+        scheduledCache = null;
+        return true;
+    } catch(e) { return false; }
+}
+
+async function checkVideoViews() {
+    const now = Date.now();
+    const videosToCheck = [];
+    for (const [videoId, data] of publishedVideos.entries()) {
+        if ((now - data.publishTime) / (1000 * 60 * 60) >= 2 && data.status === 'checking') {
+            videosToCheck.push({ videoId, ...data });
+        }
+    }
+    if (videosToCheck.length === 0) return;
+    for (const video of videosToCheck) {
+        try {
+            const response = await youtubeAuth.videos.list({ part: 'statistics', id: video.videoId });
+            const viewCount = parseInt(response.data.items?.[0]?.statistics?.viewCount || 0);
+            console.log(`📊 "${video.title}" has ${viewCount} view(s)`);
+            if (viewCount < 2) {
+                await makePrivateAndReschedule(video.videoId, video.title);
+                publishedVideos.set(video.videoId, { ...video, status: 'rescheduled' });
+            } else {
+                publishedVideos.set(video.videoId, { ...video, status: 'success', viewCount });
+            }
+        } catch(e) {}
+    }
+}
+
+async function monitor() {
+    if(isProcessing) return;
+    if(consecutiveErrors > 10) {
+        await new Promise(r => setTimeout(r, 300000));
+        consecutiveErrors = 0;
+    }
+    isProcessing = true;
+    monitorCount++;
+    try {
+        await checkVideoViews();
+        const latestPost = await getLatestPost();
+        if(!latestPost) return;
+        if(latestPost.id !== lastVideoId && lastVideoId !== null) {
+            const scheduled = await getScheduledShorts(true);
+            if(scheduled.length > 0) await publishVideo(scheduled[0].id, scheduled[0].title);
+            lastVideoId = latestPost.id;
+        } else if(lastVideoId === null) {
+            lastVideoId = latestPost.id;
+        }
+    } catch(e) { consecutiveErrors++;
+    } finally { isProcessing = false; }
+}
+
+let publicCountCache = { count: 0, timestamp: 0 };
+async function getPublicCount() {
+    const now = Date.now();
+    if(now - publicCountCache.timestamp < 300000) return publicCountCache.count;
+    try {
+        let count = 0, page = null;
+        do {
+            const res = await youtubeAuth.search.list({ part: 'snippet', channelId: YOUR_CHANNEL_ID, type: 'video', maxResults: 50, pageToken: page });
+            const ids = (res.data.items || []).map(i => i.id.videoId).filter(id => id);
+            if(ids.length) {
+                const videos = await youtubeAuth.videos.list({ part: 'status', id: ids.join(',') });
+                count += (videos.data.items || []).filter(v => v?.status?.privacyStatus === 'public').length;
+            }
+            page = res.data.nextPageToken;
+        } while(page);
+        publicCountCache = { count, timestamp: now };
+        return count;
+    } catch(e) { return publicCountCache.count; }
+}
+
+function getTimeAgo(dateString) {
+    const date = new Date(dateString);
+    const diffMins = Math.floor((Date.now() - date) / 60000);
+    if(diffMins < 1) return 'Just now';
+    if(diffMins < 60) return `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if(diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+}
+
+const bot = new Telegraf(BOT_TOKEN);
+const menu = { 
+    reply_markup: { 
+        keyboard: [['📊 STATUS', '📦 SUPPLY'], ['🔄 REFRESH', '📹 LATEST POST'], ['📈 VIEW STATUS', '📥 DOWNLOAD VIDEO']], 
+        resize_keyboard: true 
+    } 
+};
+
+bot.catch((err, ctx) => {
+    console.error('Telegram error:', err);
+    ctx.reply('⚠️ Error occurred. Please try again.');
+});
+
+bot.command('start', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const publicCount = await getPublicCount();
+    const latestPost = await getLatestPost();
+    let msg = `🤖 *YouTube Timing Bot*\n\n📹 Videos: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n🟢 Active\n📊 Monitoring: ${publishedVideos.size}\n\n`;
+    if(latestPost) msg += `*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n\n`;
+    if(scheduled.length > 0) msg += `📋 *Next:* ${scheduled[0].title}\n⏰ ${scheduled[0].time.toLocaleString()}`;
+    else msg += `📭 No scheduled shorts`;
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📊 STATUS', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    const publicCount = await getPublicCount();
+    const latestPost = await getLatestPost();
+    let msg = `📊 *STATUS*\n\n📹 Public: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n🔄 Checks: ${monitorCount}\n📊 Monitoring: ${publishedVideos.size}\n⚠️ Errors: ${consecutiveErrors}\n`;
+    if(latestPost) msg += `\n*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}`;
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📈 VIEW STATUS', async (ctx) => {
+    if (publishedVideos.size === 0) return ctx.reply('📭 No videos monitored', menu);
+    let msg = `📈 *VIEW STATUS*\n\n`;
+    for (const [id, data] of publishedVideos.entries()) {
+        const hoursAgo = ((Date.now() - data.publishTime) / (1000 * 60 * 60)).toFixed(1);
+        const emoji = data.status === 'checking' ? '⏳' : data.status === 'success' ? '✅' : '🔄';
+        msg += `${emoji} *${data.title.substring(0, 30)}*\n   ⏰ ${hoursAgo}h | ${data.status}\n`;
+        if (data.viewCount) msg += `   👁️ ${data.viewCount} views\n`;
+        msg += `\n`;
+    }
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📥 DOWNLOAD VIDEO', async (ctx) => {
+    await ctx.reply('📹 *Send YouTube URL to download*\n\nExample: `https://youtube.com/watch?v=...`', { parse_mode: 'Markdown', ...menu });
+    
+    bot.once('text', async (ctx) => {
+        const url = ctx.message.text;
+        if (url && (url.includes('youtube.com') || url.includes('youtu.be'))) {
+            await ctx.reply('⏳ Processing... This may take 30-60 seconds.');
+            const result = await downloader.downloadFromYTDown(url);
+            if (result && result.startsWith('http')) {
+                await ctx.reply(`✅ *Download Ready!*\n\n🔗 [Click to Download Video](${result})`, { parse_mode: 'Markdown', disable_web_page_preview: true });
+            } else {
+                await ctx.reply('❌ Failed to get download link. Try again.', menu);
+            }
+        } else {
+            await ctx.reply('❌ Send valid YouTube URL', menu);
+        }
+    });
+});
+
+bot.hears('📹 LATEST POST', async (ctx) => {
+    const latestPost = await getLatestPost();
+    if(!latestPost) return ctx.reply('❌ No post', menu);
+    await ctx.reply(`*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n🔗 ${latestPost.url}`, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📦 SUPPLY', async (ctx) => {
+    const scheduled = await getScheduledShorts();
+    if(!scheduled.length) return ctx.reply('📭 No scheduled shorts', menu);
+    let msg = `📦 *SUPPLY (${scheduled.length})*\n\n`;
+    scheduled.slice(0, 10).forEach((s,i) => msg += `${i+1}. ${s.title.substring(0, 40)}\n   ⏰ ${s.time.toLocaleString()}\n\n`);
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('🔄 REFRESH', async (ctx) => {
+    scheduledCache = null;
+    await ctx.reply('🔄 Refreshing...');
+    const scheduled = await getScheduledShorts(true);
+    await ctx.reply(`✅ Refreshed\n📅 Scheduled: ${scheduled.length}`, menu);
+});
+
+process.on('SIGINT', async () => {
+    await downloader.closeBrowser();
+    bot.stop('SIGINT');
+    process.exit();
+});
+
+bot.launch();
+console.log('🤖 Bot started');
+
+setTimeout(async () => {
+    const latest = await getLatestPost();
+    if(latest) { lastVideoId = latest.id; console.log(`📹 Initial ID: ${latest.id}`); }
+}, 2000);
+
+setInterval(monitor, 30000);
+monitor();
