@@ -3,7 +3,6 @@ const { google } = require('googleapis');
 const express = require('express');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const randomUseragent = require('random-useragent');
 
 puppeteer.use(StealthPlugin());
 
@@ -85,8 +84,13 @@ class YouTubeDownloaderBot {
         });
         
         ytdownPage = await browser.newPage();
-        const userAgent = randomUseragent.getRandom();
-        await ytdownPage.setUserAgent(userAgent);
+        
+        const userAgents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+        ];
+        await ytdownPage.setUserAgent(userAgents[Math.floor(Math.random() * userAgents.length)]);
+        
         await ytdownPage.setViewport({ width: 1920, height: 1080 });
         await ytdownPage.setExtraHTTPHeaders({
             'Accept-Language': 'en-US,en;q=0.9',
@@ -152,27 +156,43 @@ class YouTubeDownloaderBot {
             await ytdownPage.goto('https://ytdown.to', { waitUntil: 'networkidle2', timeout: 30000 });
             await this.humanDelay(2000, 3000);
             
+            // Find input field
             const inputField = await ytdownPage.waitForSelector('input[type="text"], input[placeholder*="Paste"]', { timeout: 10000 });
+            if (!inputField) throw new Error('Input field not found');
+            
             await inputField.click();
             await this.humanDelay(300, 600);
             
+            // Type URL
             for (const char of youtubeUrl) {
                 await ytdownPage.keyboard.type(char);
                 await this.humanDelay(30, 80);
             }
             await this.humanDelay(500, 1000);
             
-            const downloadBtn = await ytdownPage.$('button:contains("Download"), input[type="submit"]');
-            if (downloadBtn) await downloadBtn.click();
+            // Find and click Download button
+            const downloadBtn = await ytdownPage.waitForSelector('button:contains("Download"), input[type="submit"]', { timeout: 5000 });
+            if (downloadBtn) {
+                await downloadBtn.click();
+                console.log('🔘 Clicked Download button');
+            } else {
+                await ytdownPage.keyboard.press('Enter');
+                console.log('🔘 Pressed Enter');
+            }
             
-            await this.humanDelay(3000, 5000);
+            // Wait for results to load
+            await this.humanDelay(4000, 6000);
+            
+            // Smart scroll through options
             await this.smartScroll();
             
+            // Find download link
             const downloadLink = await ytdownPage.waitForSelector('a[href*="download"]', { timeout: 10000 }).catch(() => null);
             if (downloadLink) {
                 const href = await downloadLink.getProperty('href');
                 return await href.jsonValue();
             }
+            
             return null;
         } catch (error) {
             console.error('❌ Error:', error.message);
@@ -277,207 +297,4 @@ async function getScheduledShorts(force = false) {
         lastCache = now;
         return scheduled;
     } catch(e) { return []; }
-                  }
-async function publishVideo(id, title, retryCount = 0) {
-    try {
-        console.log(`📤 Publishing: ${title}`);
-        await youtubeAuth.videos.update({ part: 'status', requestBody: { id: id, status: { privacyStatus: 'public' } } });
-        console.log(`✅ Published: ${title}`);
-        publishedVideos.set(id, { publishTime: Date.now(), title: title, status: 'checking' });
-        scheduledCache = null;
-        consecutiveErrors = 0;
-        return true;
-    } catch(e) {
-        if(retryCount < 3) {
-            await new Promise(r => setTimeout(r, 10000));
-            return publishVideo(id, title, retryCount + 1);
-        }
-        return false;
     }
-}
-
-async function makePrivateAndReschedule(videoId, title) {
-    try {
-        const newPublishDate = new Date();
-        newPublishDate.setDate(newPublishDate.getDate() + 3);
-        await youtubeAuth.videos.update({
-            part: 'status',
-            requestBody: { id: videoId, status: { privacyStatus: 'private', publishAt: newPublishDate.toISOString() } }
-        });
-        console.log(`✅ "${title}" rescheduled for ${newPublishDate.toLocaleString()}`);
-        scheduledCache = null;
-        return true;
-    } catch(e) { return false; }
-}
-
-async function checkVideoViews() {
-    const now = Date.now();
-    const videosToCheck = [];
-    for (const [videoId, data] of publishedVideos.entries()) {
-        if ((now - data.publishTime) / (1000 * 60 * 60) >= 2 && data.status === 'checking') {
-            videosToCheck.push({ videoId, ...data });
-        }
-    }
-    if (videosToCheck.length === 0) return;
-    for (const video of videosToCheck) {
-        try {
-            const response = await youtubeAuth.videos.list({ part: 'statistics', id: video.videoId });
-            const viewCount = parseInt(response.data.items?.[0]?.statistics?.viewCount || 0);
-            console.log(`📊 "${video.title}" has ${viewCount} view(s)`);
-            if (viewCount < 2) {
-                await makePrivateAndReschedule(video.videoId, video.title);
-                publishedVideos.set(video.videoId, { ...video, status: 'rescheduled' });
-            } else {
-                publishedVideos.set(video.videoId, { ...video, status: 'success', viewCount });
-            }
-        } catch(e) {}
-    }
-}
-
-async function monitor() {
-    if(isProcessing) return;
-    if(consecutiveErrors > 10) {
-        await new Promise(r => setTimeout(r, 300000));
-        consecutiveErrors = 0;
-    }
-    isProcessing = true;
-    monitorCount++;
-    try {
-        await checkVideoViews();
-        const latestPost = await getLatestPost();
-        if(!latestPost) return;
-        if(latestPost.id !== lastVideoId && lastVideoId !== null) {
-            const scheduled = await getScheduledShorts(true);
-            if(scheduled.length > 0) await publishVideo(scheduled[0].id, scheduled[0].title);
-            lastVideoId = latestPost.id;
-        } else if(lastVideoId === null) {
-            lastVideoId = latestPost.id;
-        }
-    } catch(e) { consecutiveErrors++;
-    } finally { isProcessing = false; }
-}
-
-let publicCountCache = { count: 0, timestamp: 0 };
-async function getPublicCount() {
-    const now = Date.now();
-    if(now - publicCountCache.timestamp < 300000) return publicCountCache.count;
-    try {
-        let count = 0, page = null;
-        do {
-            const res = await youtubeAuth.search.list({ part: 'snippet', channelId: YOUR_CHANNEL_ID, type: 'video', maxResults: 50, pageToken: page });
-            const ids = (res.data.items || []).map(i => i.id.videoId).filter(id => id);
-            if(ids.length) {
-                const videos = await youtubeAuth.videos.list({ part: 'status', id: ids.join(',') });
-                count += (videos.data.items || []).filter(v => v?.status?.privacyStatus === 'public').length;
-            }
-            page = res.data.nextPageToken;
-        } while(page);
-        publicCountCache = { count, timestamp: now };
-        return count;
-    } catch(e) { return publicCountCache.count; }
-}
-
-function getTimeAgo(dateString) {
-    const date = new Date(dateString);
-    const diffMins = Math.floor((Date.now() - date) / 60000);
-    if(diffMins < 1) return 'Just now';
-    if(diffMins < 60) return `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if(diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
-}
-
-const bot = new Telegraf(BOT_TOKEN);
-const menu = { 
-    reply_markup: { 
-        keyboard: [['📊 STATUS', '📦 SUPPLY'], ['🔄 REFRESH', '📹 LATEST POST'], ['📈 VIEW STATUS', '📥 DOWNLOAD VIDEO']], 
-        resize_keyboard: true 
-    } 
-};
-
-bot.catch((err, ctx) => ctx.reply('⚠️ Error occurred'));
-
-bot.command('start', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    const publicCount = await getPublicCount();
-    const latestPost = await getLatestPost();
-    let msg = `🤖 *YouTube Timing Bot*\n\n📹 Videos: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n🟢 Active\n📊 Monitoring: ${publishedVideos.size}\n\n`;
-    if(latestPost) msg += `*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n\n`;
-    if(scheduled.length > 0) msg += `📋 *Next:* ${scheduled[0].title}\n⏰ ${scheduled[0].time.toLocaleString()}`;
-    else msg += `📭 No scheduled shorts`;
-    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('📊 STATUS', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    const publicCount = await getPublicCount();
-    const latestPost = await getLatestPost();
-    let msg = `📊 *STATUS*\n\n📹 Public: ${publicCount}\n📅 Scheduled: ${scheduled.length}\n🎯 Target: ${TARGET_CHANNEL_HANDLE}\n🔄 Checks: ${monitorCount}\n📊 Monitoring: ${publishedVideos.size}\n⚠️ Errors: ${consecutiveErrors}\n`;
-    if(latestPost) msg += `\n*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}`;
-    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('📈 VIEW STATUS', async (ctx) => {
-    if (publishedVideos.size === 0) return ctx.reply('📭 No videos monitored', menu);
-    let msg = `📈 *VIEW STATUS*\n\n`;
-    for (const [id, data] of publishedVideos.entries()) {
-        const hoursAgo = ((Date.now() - data.publishTime) / (1000 * 60 * 60)).toFixed(1);
-        const emoji = data.status === 'checking' ? '⏳' : data.status === 'success' ? '✅' : '🔄';
-        msg += `${emoji} *${data.title.substring(0, 30)}*\n   ⏰ ${hoursAgo}h | ${data.status}\n`;
-        if (data.viewCount) msg += `   👁️ ${data.viewCount} views\n`;
-        msg += `\n`;
-    }
-    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('📥 DOWNLOAD VIDEO', async (ctx) => {
-    await ctx.reply('📹 Send YouTube URL:');
-    bot.once('text', async (ctx) => {
-        const url = ctx.message.text;
-        if (url && (url.includes('youtube.com') || url.includes('youtu.be'))) {
-            await ctx.reply('⏳ Downloading with smart scroll...');
-            const result = await downloader.downloadFromYTDown(url);
-            if (result) await ctx.reply(`✅ [Download Video](${result})`, { parse_mode: 'Markdown' });
-            else await ctx.reply('❌ Failed');
-        } else await ctx.reply('❌ Invalid URL');
-    });
-});
-
-bot.hears('📹 LATEST POST', async (ctx) => {
-    const latestPost = await getLatestPost();
-    if(!latestPost) return ctx.reply('❌ No post', menu);
-    await ctx.reply(`*Latest:* ${latestPost.title}\n⏰ ${getTimeAgo(latestPost.publishedAt)}\n🔗 ${latestPost.url}`, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('📦 SUPPLY', async (ctx) => {
-    const scheduled = await getScheduledShorts();
-    if(!scheduled.length) return ctx.reply('📭 No scheduled shorts', menu);
-    let msg = `📦 *SUPPLY (${scheduled.length})*\n\n`;
-    scheduled.slice(0, 10).forEach((s,i) => msg += `${i+1}. ${s.title.substring(0, 40)}\n   ⏰ ${s.time.toLocaleString()}\n\n`);
-    await ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
-});
-
-bot.hears('🔄 REFRESH', async (ctx) => {
-    scheduledCache = null;
-    await ctx.reply('🔄 Refreshing...');
-    const scheduled = await getScheduledShorts(true);
-    await ctx.reply(`✅ Refreshed\n📅 Scheduled: ${scheduled.length}`, menu);
-});
-
-process.on('SIGINT', async () => {
-    await downloader.closeBrowser();
-    bot.stop('SIGINT');
-    process.exit();
-});
-
-bot.launch();
-console.log('🤖 Bot started');
-
-setTimeout(async () => {
-    const latest = await getLatestPost();
-    if(latest) { lastVideoId = latest.id; console.log(`📹 Initial ID: ${latest.id}`); }
-}, 2000);
-
-setInterval(monitor, 30000);
-monitor();
