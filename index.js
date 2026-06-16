@@ -460,3 +460,496 @@ function getSupplyStats() {
     const size = getSupplySize();
     return { count, size };
         }
+// Re-upload video INSTANTLY when target channel uploads
+async function reuploadVideoForTarget(videoData) {
+    console.log(`🔄 Re-uploading for target upload: ${videoData.title}`);
+    
+    try {
+        const cachedVideo = videoFileCache.get(videoData.id);
+        
+        if (!cachedVideo || !fs.existsSync(cachedVideo.filePath)) {
+            console.log(`❌ Video file not found: ${videoData.title}`);
+            return null;
+        }
+        
+        if (!canUploadToday()) {
+            console.log(`⏳ Daily limit reached, adding to queue for later...`);
+            uploadQueue.push({
+                videoId: `reup_${Date.now()}`,
+                filePath: cachedVideo.filePath,
+                title: `${videoData.title} (Re-up ${(videoData.videoAttempts || 0) + 1})`,
+                hashtags: videoData.hashtags || [],
+                description: videoData.description || '',
+                fileSize: cachedVideo.fileSize || 0,
+                isReupload: true,
+                originalId: videoData.id,
+                videoAttempts: (videoData.videoAttempts || 0) + 1
+            });
+            return null;
+        }
+        
+        const newAttempt = (videoData.videoAttempts || 0) + 1;
+        const newTitle = `${videoData.title} (${newAttempt})`;
+        
+        const result = await uploadToYouTube(
+            cachedVideo.filePath,
+            newTitle,
+            videoData.description || '',
+            videoData.hashtags || []
+        );
+        
+        dailyUploadCount++;
+        
+        console.log(`✅ Re-uploaded as new video: ${newTitle}`);
+        console.log(`🆔 New Video ID: ${result.id}`);
+        console.log(`📊 Daily uploads: ${dailyUploadCount}/${MAX_DAILY_UPLOADS}`);
+        
+        await addToSupply(
+            result.id,
+            newTitle,
+            videoData.hashtags || [],
+            videoData.description || '',
+            cachedVideo.filePath,
+            cachedVideo.fileSize || 0
+        );
+        
+        const newCached = videoFileCache.get(result.id);
+        if (newCached) {
+            newCached.videoAttempts = newAttempt;
+            videoFileCache.set(result.id, newCached);
+        }
+        
+        if (videoData.id !== result.id) {
+            videoFileCache.delete(videoData.id);
+        }
+        
+        return result;
+        
+    } catch(error) {
+        console.error(`❌ Re-upload failed:`, error.message);
+        
+        if (error.message.includes('exceeded the number of videos')) {
+            const cachedVideo = videoFileCache.get(videoData.id);
+            if (cachedVideo) {
+                uploadQueue.push({
+                    videoId: `reup_${Date.now()}`,
+                    filePath: cachedVideo.filePath,
+                    title: `${videoData.title} (Re-up ${(videoData.videoAttempts || 0) + 1})`,
+                    hashtags: videoData.hashtags || [],
+                    description: videoData.description || '',
+                    fileSize: cachedVideo.fileSize || 0,
+                    isReupload: true,
+                    originalId: videoData.id,
+                    videoAttempts: (videoData.videoAttempts || 0) + 1
+                });
+            }
+        }
+        return null;
+    }
+}
+
+// Monitor active video views
+async function monitorActiveVideoViews() {
+    if (!activeVideo) return;
+    
+    const timeElapsed = Date.now() - activeVideo.publishTime;
+    
+    if (timeElapsed >= VIEW_CHECK_INTERVAL && activeVideo.status === 'active') {
+        console.log(`\n📊 Checking views: ${activeVideo.title}`);
+        
+        const viewCount = await getVideoViews(activeVideo.id);
+        console.log(`   Views: ${viewCount} (Need ${VIEW_THRESHOLD}+)`);
+        
+        if (viewCount < VIEW_THRESHOLD) {
+            console.log(`⚠️ Low views! Will re-upload when target channel uploads next time`);
+            
+            const cachedVideo = videoFileCache.get(activeVideo.id);
+            
+            if (cachedVideo && fs.existsSync(cachedVideo.filePath)) {
+                supplyVideos.push({
+                    id: activeVideo.id,
+                    title: activeVideo.title,
+                    hashtags: activeVideo.hashtags || [],
+                    description: activeVideo.description || '',
+                    filePath: cachedVideo.filePath,
+                    fileSize: cachedVideo.fileSize || 0,
+                    status: 'waiting_reupload',
+                    addedTime: Date.now(),
+                    resupplyCount: (activeVideo.resupplyCount || 0) + 1,
+                    videoAttempts: (activeVideo.videoAttempts || 0) + 1
+                });
+                
+                cachedVideo.inSupply = true;
+                cachedVideo.lastAccessed = Date.now();
+                cachedVideo.videoAttempts = (activeVideo.videoAttempts || 0) + 1;
+                videoFileCache.set(activeVideo.id, cachedVideo);
+                
+                console.log(`🔄 Video marked for re-upload on next target channel upload`);
+                console.log(`📦 Attempt ${cachedVideo.videoAttempts} waiting in supply`);
+            }
+            
+            activeVideo = null;
+            
+        } else {
+            console.log(`✅ Good views! Video stays public.`);
+            activeVideo.status = 'completed';
+            
+            const cachedVideo = videoFileCache.get(activeVideo.id);
+            if (cachedVideo && fs.existsSync(cachedVideo.filePath)) {
+                fs.unlinkSync(cachedVideo.filePath);
+                videoFileCache.delete(activeVideo.id);
+                console.log(`🗑️ Removed from server (successful)`);
+            }
+            
+            activeVideo = null;
+        }
+    }
+}
+
+// Monitor target channel
+async function monitorTargetChannel() {
+    const now = Date.now();
+    if (now - lastTargetCheck < 30000) return;
+    lastTargetCheck = now;
+    targetCheckCount++;
+    
+    try {
+        if (!channelCache || (now - channelCacheTime > 3600000)) {
+            const youtube = getYoutube();
+            if (!youtube) return;
+            
+            const res = await youtube.channels.list({
+                part: 'contentDetails',
+                id: TARGET_CHANNEL_ID
+            });
+            
+            channelCache = res.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+            channelCacheTime = now;
+        }
+        
+        if (!channelCache) return;
+        
+        const youtube = getYoutube();
+        if (!youtube) return;
+        
+        const res = await youtube.playlistItems.list({
+            part: 'snippet',
+            playlistId: channelCache,
+            maxResults: 1
+        });
+        
+        if (!res.data.items?.length) return;
+        
+        const latestVideo = {
+            id: res.data.items[0].snippet.resourceId.videoId,
+            title: res.data.items[0].snippet.title
+        };
+        
+        if (latestVideo.id !== lastVideoId && lastVideoId !== null) {
+            console.log(`\n🎬 Target channel uploaded: ${latestVideo.title}`);
+            
+            const reuploadCandidates = supplyVideos.filter(v => v.status === 'waiting_reupload');
+            
+            if (reuploadCandidates.length > 0) {
+                const videoToReupload = reuploadCandidates[0];
+                console.log(`🔄 Found video waiting for re-upload: ${videoToReupload.title}`);
+                
+                const index = supplyVideos.indexOf(videoToReupload);
+                if (index > -1) {
+                    supplyVideos.splice(index, 1);
+                }
+                
+                const newVideo = await reuploadVideoForTarget(videoToReupload);
+                
+                if (newVideo) {
+                    console.log(`✅ Re-uploaded successfully: ${newVideo.title}`);
+                    console.log(`🆔 New Video ID: ${newVideo.id}`);
+                    
+                    await updateVideoPrivacy(newVideo.id, 'public');
+                    
+                    activeVideo = {
+                        ...newVideo,
+                        publishTime: Date.now(),
+                        status: 'active'
+                    };
+                    
+                    console.log(`📤 Now public - will check views in 1 hour`);
+                }
+            } else {
+                const nextVideo = getNextFromSupply();
+                
+                if (nextVideo) {
+                    console.log(`📤 Publishing from supply: ${nextVideo.title}`);
+                    await updateVideoPrivacy(nextVideo.id, 'public');
+                    
+                    activeVideo = {
+                        ...nextVideo,
+                        publishTime: Date.now(),
+                        status: 'active'
+                    };
+                    
+                    if (videoFileCache.has(nextVideo.id)) {
+                        const cached = videoFileCache.get(nextVideo.id);
+                        cached.inSupply = false;
+                        cached.lastAccessed = Date.now();
+                        videoFileCache.set(nextVideo.id, cached);
+                    }
+                    
+                    console.log(`✅ Now public - will check views in 1 hour`);
+                } else {
+                    console.log(`📭 No videos in supply to publish`);
+                }
+            }
+            
+            lastVideoId = latestVideo.id;
+        } else if (lastVideoId === null) {
+            lastVideoId = latestVideo.id;
+            console.log(`📝 Initialized`);
+        }
+        
+    } catch(error) {
+        console.error('Monitor error:', error.message);
+    }
+}
+
+// Process new video
+async function processNewVideo(videoFileId, title, hashtags, description, ctx, messageId, botInstance) {
+    const tempVideoId = `temp_${Date.now()}`;
+    let tempFile = null;
+    
+    try {
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, messageId, null,
+            `📥 Downloading: ${title}`
+        );
+        
+        tempFile = await downloadAndSaveVideo(videoFileId, botInstance, tempVideoId);
+        
+        const stats = fs.statSync(tempFile);
+        const fileSizeMB = stats.size / (1024 * 1024);
+        
+        if (fileSizeMB > MAX_CACHE_SIZE_MB) {
+            throw new Error(`Video too large (${fileSizeMB.toFixed(2)}MB).`);
+        }
+        
+        const remainingUploads = MAX_DAILY_UPLOADS - dailyUploadCount;
+        
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, messageId, null,
+            `📤 Uploading to YouTube...\n` +
+            `📊 Daily uploads remaining: ${remainingUploads}`
+        );
+        
+        if (canUploadToday()) {
+            const result = await uploadToYouTube(tempFile, title, description, hashtags);
+            dailyUploadCount++;
+            
+            const finalPath = path.join(TEMP_DIR, `${result.id}.mp4`);
+            fs.renameSync(tempFile, finalPath);
+            
+            await addToSupply(result.id, title, hashtags, description, finalPath, fileSizeMB);
+            
+            const totalSize = getTotalCacheSize();
+            const supplySize = getSupplySize();
+            
+            await ctx.telegram.editMessageText(
+                ctx.chat.id, messageId, null,
+                `✅ **Added to Supply!**\n\n` +
+                `📹 ${title}\n` +
+                `📦 Supply: ${supplyVideos.length} videos (${supplySize.toFixed(2)}MB)\n` +
+                `💾 Cache: ${totalSize.toFixed(2)}MB/${MAX_CACHE_SIZE_MB}MB\n` +
+                `📊 Daily: ${dailyUploadCount}/${MAX_DAILY_UPLOADS}\n` +
+                `🎯 Will publish when ${TARGET_CHANNEL_HANDLE} uploads\n` +
+                `🔄 Will re-upload as NEW video if under ${VIEW_THRESHOLD} views`,
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            uploadQueue.push({
+                videoId: tempVideoId,
+                filePath: tempFile,
+                title: title,
+                hashtags: hashtags,
+                description: description,
+                fileSize: fileSizeMB,
+                addedTime: Date.now(),
+                isReupload: false
+            });
+            
+            await ctx.telegram.editMessageText(
+                ctx.chat.id, messageId, null,
+                `⏳ **Added to Upload Queue!**\n\n` +
+                `📹 ${title}\n` +
+                `📊 Position: ${uploadQueue.length}\n` +
+                `📈 Daily limit reached: ${dailyUploadCount}/${MAX_DAILY_UPLOADS}\n` +
+                `⏰ Will upload when limit resets`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+        
+    } catch(error) {
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, messageId, null,
+            `❌ Failed: ${title}\nError: ${error.message}`
+        );
+        if (tempFile && fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    }
+}
+
+async function refreshToken() {
+    try {
+        await oauth2Client.refreshAccessToken();
+        youtubeAuth = google.youtube({ version: 'v3', auth: oauth2Client });
+        console.log('✅ Token refreshed');
+    } catch(e) {
+        console.error('❌ Token refresh failed:', e.message);
+    }
+}
+
+// ============ TELEGRAM BOT ============
+const bot = new Telegraf(BOT_TOKEN);
+
+const menu = { 
+    reply_markup: { 
+        keyboard: [['📊 STATUS', '📦 SUPPLY'], ['🔄 REFRESH', '📥 QUEUE']], 
+        resize_keyboard: true 
+    } 
+};
+
+// Handle video messages
+bot.on('video', async (ctx) => {
+    const video = ctx.message.video;
+    const caption = ctx.message.caption || '';
+    const { title, hashtags, description } = extractVideoInfo(caption);
+    
+    const fileSizeMB = video.file_size / (1024 * 1024);
+    
+    if (fileSizeMB > MAX_CACHE_SIZE_MB) {
+        return ctx.reply(`❌ Video too large. Maximum ${MAX_CACHE_SIZE_MB}MB.`);
+    }
+    
+    const availableSpace = getAvailableSpaceMB();
+    if (fileSizeMB > availableSpace) {
+        await cleanupCache();
+        const newAvailable = getAvailableSpaceMB();
+        if (fileSizeMB > newAvailable) {
+            return ctx.reply(`❌ Not enough space! Need ${fileSizeMB.toFixed(2)}MB, available ${newAvailable.toFixed(2)}MB.`);
+        }
+    }
+    
+    const msg = await ctx.reply(
+        `🔄 Processing: ${title}\n📦 ${fileSizeMB.toFixed(2)} MB\n📊 Daily uploads: ${dailyUploadCount}/${MAX_DAILY_UPLOADS}`,
+        { parse_mode: 'Markdown' }
+    );
+    
+    await processNewVideo(video.file_id, title, hashtags, description, ctx, msg.message_id, bot);
+});
+
+bot.command('start', async (ctx) => {
+    const totalSize = getTotalCacheSize();
+    const supplySize = getSupplySize();
+    const remainingUploads = MAX_DAILY_UPLOADS - dailyUploadCount;
+    ctx.reply(
+        `🤖 *YouTube Supply Bot - Instant Re-upload*\n\n` +
+        `**How it works:**\n` +
+        `1. Send video → Uploaded as NEW private video\n` +
+        `2. Added to supply queue\n` +
+        `3. When target uploads → Your video goes PUBLIC\n` +
+        `4. After 1 hour:\n` +
+        `   • Under ${VIEW_THRESHOLD} views → **WAITS for next target upload**\n` +
+        `   • Then RE-UPLOADED as NEW video instantly\n` +
+        `   • ${VIEW_THRESHOLD}+ views → Stays public ✅\n\n` +
+        `**Key Feature:** Re-upload happens INSTANTLY when target channel uploads!\n\n` +
+        `📈 Daily: ${dailyUploadCount}/${MAX_DAILY_UPLOADS}\n` +
+        `💾 Cache: ${totalSize.toFixed(2)}MB/${MAX_CACHE_SIZE_MB}MB\n` +
+        `📦 Supply: ${supplyVideos.length} videos`,
+        { parse_mode: 'Markdown', ...menu }
+    );
+});
+
+bot.hears('📊 STATUS', async (ctx) => {
+    const totalSize = getTotalCacheSize();
+    const supplySize = getSupplySize();
+    const supplyStats = getSupplyStats();
+    const remainingUploads = MAX_DAILY_UPLOADS - dailyUploadCount;
+    
+    const waitingReupload = supplyVideos.filter(v => v.status === 'waiting_reupload').length;
+    
+    let msg = `📊 *STATUS*\n\n` +
+        `📈 Daily Uploads: ${dailyUploadCount}/${MAX_DAILY_UPLOADS} (${remainingUploads} left)\n` +
+        `📥 Upload Queue: ${uploadQueue.length} videos\n` +
+        `📦 Supply: ${supplyStats.count} videos (${supplySize.toFixed(2)}MB)\n` +
+        `🔄 Waiting for re-upload: ${waitingReupload} videos\n` +
+        `🎥 Active: ${activeVideo?.title || 'None'}\n` +
+        `💾 Cache: ${totalSize.toFixed(2)}MB/${MAX_CACHE_SIZE_MB}MB\n` +
+        `🎯 Target: ${TARGET_CHANNEL_HANDLE}\n\n`;
+    
+    if (activeVideo) {
+        const timeActive = Math.floor((Date.now() - activeVideo.publishTime) / 60000);
+        const timeLeft = 60 - timeActive;
+        msg += `*Active Video:*\n` +
+               `📹 ${activeVideo.title}\n` +
+               `⏰ Check in: ${timeLeft} minutes\n` +
+               `🔄 Will re-upload on next target upload if under ${VIEW_THRESHOLD} views\n`;
+    }
+    
+    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+});
+
+bot.hears('📦 SUPPLY', async (ctx) => {
+    if (supplyVideos.length === 0) {
+        ctx.reply('📭 Supply is empty', menu);
+    } else {
+        const supplySize = getSupplySize();
+        let msg = `📦 *SUPPLY (${supplyVideos.length} videos)*\n💾 ${supplySize.toFixed(2)}MB\n\n`;
+        
+        supplyVideos.forEach((video, i) => {
+            msg += `${i+1}. ${video.title.substring(0, 40)}\n`;
+            if (video.videoAttempts) {
+                msg += `   🔄 Attempt: ${video.videoAttempts}\n`;
+            }
+            if (video.status === 'waiting_reupload') {
+                msg += `   ⏳ Waiting for target upload\n`;
+            }
+            msg += `   📦 ${video.fileSize.toFixed(2)}MB\n`;
+        });
+        ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+    }
+});
+
+bot.hears('📥 QUEUE', async (ctx) => {
+    if (uploadQueue.length === 0) {
+        ctx.reply('📭 Upload queue is empty', menu);
+    } else {
+        let msg = `📥 *UPLOAD QUEUE (${uploadQueue.length})*\n\n`;
+        uploadQueue.forEach((task, i) => {
+            msg += `${i+1}. ${task.title.substring(0, 40)}\n`;
+            if (task.isReupload) {
+                msg += `   🔄 Re-upload waiting\n`;
+            }
+            msg += `   📦 ${task.fileSize.toFixed(2)}MB\n`;
+        });
+        ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
+    }
+});
+
+bot.hears('🔄 REFRESH', async (ctx) => {
+    await cleanupCache();
+    await processUploadQueue();
+    const totalSize = getTotalCacheSize();
+    const supplySize = getSupplySize();
+    ctx.reply(`✅ Refreshed\n📈 Daily: ${dailyUploadCount}/${MAX_DAILY_UPLOADS}\n📦 Supply: ${supplyVideos.length} videos\n💾 Cache: ${totalSize.toFixed(2)}MB/${MAX_CACHE_SIZE_MB}MB`, menu);
+});
+
+// Start monitoring
+setInterval(refreshToken, 45 * 60 * 1000);
+setInterval(monitorTargetChannel, 30000);
+setInterval(monitorActiveVideoViews, 60000);
+setInterval(cleanupCache, 300000);
+setInterval(processUploadQueue, 60000);
+
+bot.launch();
+console.log('🚀 YouTube Supply Bot Started!');
+console.log(`🔄 Videos with < ${VIEW_THRESHOLD} views will be RE-UPLOADED when target channel uploads`);
+console.log(`⏱️ Re-upload happens INSTANTLY on target channel upload`);
+console.log(`📈 Daily upload limit: ${MAX_DAILY_UPLOADS} videos`);
+console.log(`💾 Cache limit: ${MAX_CACHE_SIZE_MB}MB`);
