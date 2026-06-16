@@ -175,7 +175,7 @@ async function cleanupCache() {
     console.log(`✅ Freed ${freedSpace.toFixed(2)}MB (removed ${removedCount} videos)`);
 }
 
-// Process upload queue with cooldown (for NEW uploads only)
+// Process upload queue with cooldown
 async function processUploadQueue() {
     if (isUploading || uploadQueue.length === 0) return;
     if (!canUploadToday()) {
@@ -361,3 +361,102 @@ async function uploadToYouTube(filePath, title, description, hashtags) {
         throw error;
     }
 }
+
+// Update video privacy
+async function updateVideoPrivacy(videoId, privacyStatus) {
+    try {
+        await youtubeAuth.videos.update({
+            part: 'status',
+            requestBody: {
+                id: videoId,
+                status: { privacyStatus: privacyStatus }
+            }
+        });
+        return true;
+    } catch(error) {
+        console.error(`Failed to update privacy: ${videoId}`, error.message);
+        return false;
+    }
+}
+
+// Get video views with cache
+async function getVideoViews(videoId) {
+    if (viewsCache.has(videoId)) {
+        const cached = viewsCache.get(videoId);
+        if (Date.now() - cached.time < 600000) {
+            return cached.views;
+        }
+    }
+    
+    try {
+        const youtube = getYoutube();
+        if (!youtube) return 0;
+        
+        const response = await youtube.videos.list({
+            part: 'statistics',
+            id: videoId
+        });
+        
+        const views = parseInt(response.data.items?.[0]?.statistics?.viewCount || 0);
+        viewsCache.set(videoId, { views: views, time: Date.now() });
+        
+        return views;
+    } catch(error) {
+        return 0;
+    }
+}
+
+// Add video to supply
+async function addToSupply(videoId, title, hashtags, description, filePath, fileSize) {
+    const availableSpace = getAvailableSpaceMB();
+    if (fileSize > availableSpace) {
+        await cleanupCache();
+        const newAvailable = getAvailableSpaceMB();
+        if (fileSize > newAvailable) {
+            throw new Error(`Not enough space! Need ${fileSize.toFixed(2)}MB`);
+        }
+    }
+    
+    supplyVideos.push({
+        id: videoId,
+        title: title,
+        hashtags: hashtags,
+        description: description,
+        filePath: filePath,
+        fileSize: fileSize,
+        status: 'scheduled',
+        addedTime: Date.now(),
+        resupplyCount: 0,
+        videoAttempts: 0
+    });
+    
+    videoFileCache.set(videoId, {
+        videoId: videoId,
+        title: title,
+        hashtags: hashtags,
+        description: description,
+        filePath: filePath,
+        fileSize: fileSize,
+        inSupply: true,
+        addedTime: Date.now(),
+        lastAccessed: Date.now(),
+        videoAttempts: 0
+    });
+    
+    const totalSize = getTotalCacheSize();
+    const supplySize = getSupplySize();
+    console.log(`📦 Added to supply: ${title} (${fileSize.toFixed(2)}MB)`);
+    console.log(`📊 Daily uploads: ${dailyUploadCount}/${MAX_DAILY_UPLOADS}`);
+}
+
+// Get next video from supply
+function getNextFromSupply() {
+    if (supplyVideos.length === 0) return null;
+    return supplyVideos.shift();
+}
+
+function getSupplyStats() {
+    const count = supplyVideos.length;
+    const size = getSupplySize();
+    return { count, size };
+        }
