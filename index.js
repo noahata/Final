@@ -130,8 +130,8 @@ function extractVideoInfo(caption) {
 }
 
 // Download video from Telegram
-async function downloadAndSaveVideo(fileId, bot, videoId) {
-    const fileLink = await bot.telegram.getFileLink(fileId);
+async function downloadAndSaveVideo(fileId, botInstance, videoId) {
+    const fileLink = await botInstance.telegram.getFileLink(fileId);
     const tempPath = path.join(TEMP_DIR, `${videoId}.mp4`);
     
     const response = await axios({
@@ -415,8 +415,8 @@ async function monitorTargetChannel() {
     }
 }
 
-// Process new video
-async function processNewVideo(videoFileId, title, hashtags, description, ctx, messageId) {
+// Process new video - FIXED LINE 345
+async function processNewVideo(videoFileId, title, hashtags, description, ctx, messageId, botInstance) {
     const tempVideoId = `temp_${Date.now()}`;
     let tempFile = null;
     
@@ -426,7 +426,8 @@ async function processNewVideo(videoFileId, title, hashtags, description, ctx, m
             `📥 Downloading: ${title}`
         );
         
-        tempFile = await downloadAndSaveVideo(videoFileId, ctx.bot, tempVideoId);
+        // FIXED: Changed from ctx.bot to botInstance
+        tempFile = await downloadAndSaveVideo(videoFileId, botInstance, tempVideoId);
         
         await ctx.telegram.editMessageText(
             ctx.chat.id, messageId, null,
@@ -490,6 +491,7 @@ const menu = {
     } 
 };
 
+// Handle video messages - Pass bot instance
 bot.on('video', async (ctx) => {
     const video = ctx.message.video;
     const caption = ctx.message.caption || '';
@@ -500,7 +502,8 @@ bot.on('video', async (ctx) => {
         { parse_mode: 'Markdown' }
     );
     
-    await processNewVideo(video.file_id, title, hashtags, description, ctx, msg.message_id);
+    // Pass the bot instance
+    await processNewVideo(video.file_id, title, hashtags, description, ctx, msg.message_id, bot);
 });
 
 bot.command('start', async (ctx) => {
