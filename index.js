@@ -345,10 +345,10 @@ async function monitorActiveVideoViews() {
     }
 }
 
-// Monitor target channel
+// Monitor target channel - NOW CHECKS EVERY 30 SECONDS
 async function monitorTargetChannel() {
     const now = Date.now();
-    if (now - lastTargetCheck < 120000) return;
+    if (now - lastTargetCheck < 30000) return; // 30 seconds between API calls
     lastTargetCheck = now;
     targetCheckCount++;
     
@@ -415,7 +415,7 @@ async function monitorTargetChannel() {
     }
 }
 
-// Process new video - FIXED LINE 345
+// Process new video
 async function processNewVideo(videoFileId, title, hashtags, description, ctx, messageId, botInstance) {
     const tempVideoId = `temp_${Date.now()}`;
     let tempFile = null;
@@ -426,7 +426,6 @@ async function processNewVideo(videoFileId, title, hashtags, description, ctx, m
             `📥 Downloading: ${title}`
         );
         
-        // FIXED: Changed from ctx.bot to botInstance
         tempFile = await downloadAndSaveVideo(videoFileId, botInstance, tempVideoId);
         
         await ctx.telegram.editMessageText(
@@ -491,7 +490,7 @@ const menu = {
     } 
 };
 
-// Handle video messages - Pass bot instance
+// Handle video messages
 bot.on('video', async (ctx) => {
     const video = ctx.message.video;
     const caption = ctx.message.caption || '';
@@ -502,7 +501,6 @@ bot.on('video', async (ctx) => {
         { parse_mode: 'Markdown' }
     );
     
-    // Pass the bot instance
     await processNewVideo(video.file_id, title, hashtags, description, ctx, msg.message_id, bot);
 });
 
@@ -561,7 +559,7 @@ bot.hears('🔄 REFRESH', async (ctx) => {
 
 // Start monitoring
 setInterval(refreshToken, 45 * 60 * 1000);
-setInterval(monitorTargetChannel, 30000);
+setInterval(monitorTargetChannel, 30000); // Runs every 30 seconds
 setInterval(monitorActiveVideoViews, 60000);
 
 bot.launch();
@@ -569,3 +567,4 @@ console.log('🚀 YouTube Supply Bot Started!');
 console.log(`📦 Max supply: ${MAX_SUPPLY} videos`);
 console.log(`🎯 Target: ${TARGET_CHANNEL_HANDLE}`);
 console.log(`📊 View threshold: ${VIEW_THRESHOLD} views in 1 hour`);
+console.log(`⏱️ Target channel checked every 30 seconds`);
