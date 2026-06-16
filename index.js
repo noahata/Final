@@ -21,17 +21,27 @@ const API_KEYS = [
     'AIzaSyDjLVpU8M9VFBAuj-_pvSyDW1BbUfCjyIY'
 ];
 
-let currentKey = 0, keyUsage = [0,0,0];
+let currentKey = 0;
+let keyUsage = [0, 0, 0];
 let keyReset = [Date.now(), Date.now(), Date.now()];
 let lastVideoId = null;
-let isProcessing = false;
-let scheduledCache = null;
-let lastCache = 0;
 let monitorCount = 0;
-let consecutiveErrors = 0;
 
-let downloadQueue = [];
-let isDownloading = false;
+// Store videos on server
+let supplyVideos = [];
+let activeVideo = null;
+let videoFileCache = new Map();
+
+const MAX_SUPPLY = 3;
+const VIEW_THRESHOLD = 10;
+const VIEW_CHECK_INTERVAL = 60 * 60 * 1000; // 1 hour
+
+// Cache for API responses
+let channelCache = null;
+let channelCacheTime = 0;
+let lastTargetCheck = 0;
+let targetCheckCount = 0;
+let viewsCache = new Map();
 
 const TEMP_DIR = '/tmp/youtube_bot';
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -43,8 +53,12 @@ app.get('/', (req, res) => res.send('Bot Running'));
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
-        queueSize: downloadQueue.length,
-        monitorCount
+        supplyCount: supplyVideos.length,
+        activeVideo: activeVideo?.title || 'None',
+        cachedVideos: videoFileCache.size,
+        monitorCount,
+        apiKeyUsage: keyUsage,
+        targetCheckCount
     });
 });
 
@@ -55,6 +69,7 @@ const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, 'https://d
 oauth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
 let youtubeAuth = google.youtube({ version: 'v3', auth: oauth2Client });
 
+// Optimized API key management
 function getApiKey() {
     const now = Date.now();
     const ONE_DAY = 86400000;
@@ -63,20 +78,24 @@ function getApiKey() {
         if(now - keyReset[i] > ONE_DAY) { 
             keyUsage[i] = 0; 
             keyReset[i] = now; 
+            console.log(`🔄 Reset quota for key ${i+1}`);
         }
         
-        if(keyUsage[i] < 50) {
+        if(keyUsage[i] < 9000) {
             currentKey = i;
-            keyUsage[i]++;
             return API_KEYS[i];
         }
     }
+    
+    console.error('⚠️ ALL API KEYS EXHAUSTED! Waiting for daily reset...');
     return null;
 }
 
 function getYoutube() { 
     const key = getApiKey();
-    return key ? google.youtube({ version: 'v3', auth: key }) : null;
+    if (!key) return null;
+    keyUsage[currentKey] += 1;
+    return google.youtube({ version: 'v3', auth: key });
 }
 
 // Extract title and hashtags from caption
@@ -111,8 +130,10 @@ function extractVideoInfo(caption) {
 }
 
 // Download video from Telegram
-async function downloadFromTelegram(fileId, bot, tempPath) {
+async function downloadAndSaveVideo(fileId, bot, videoId) {
     const fileLink = await bot.telegram.getFileLink(fileId);
+    const tempPath = path.join(TEMP_DIR, `${videoId}.mp4`);
+    
     const response = await axios({
         method: 'GET',
         url: fileLink.href,
@@ -128,7 +149,7 @@ async function downloadFromTelegram(fileId, bot, tempPath) {
     });
 }
 
-// Upload to YouTube and auto-delete
+// Upload to YouTube
 async function uploadToYouTube(filePath, title, description, hashtags) {
     let fileStream = null;
     
@@ -143,7 +164,7 @@ async function uploadToYouTube(filePath, title, description, hashtags) {
                 categoryId: '22'
             },
             status: {
-                privacyStatus: 'public',
+                privacyStatus: 'private',
                 selfDeclaredMadeForKids: false
             }
         };
@@ -157,176 +178,306 @@ async function uploadToYouTube(filePath, title, description, hashtags) {
         });
         
         if (fileStream) fileStream.close();
-        fs.unlinkSync(filePath);
         
-        return response.data;
+        return {
+            id: response.data.id,
+            title: title
+        };
         
     } catch(error) {
         if (fileStream) fileStream.close();
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         throw error;
     }
-                }
-// Process queue
-async function processDownloadQueue(bot) {
-    if (isDownloading || downloadQueue.length === 0) return;
-    
-    isDownloading = true;
-    
-    while (downloadQueue.length > 0) {
-        const task = downloadQueue.shift();
-        const { videoFileId, title, hashtags, description, ctx, messageId } = task;
-        
-        const tempFile = path.join(TEMP_DIR, `${Date.now()}.mp4`);
-        
-        try {
-            await ctx.telegram.editMessageText(
-                ctx.chat.id, messageId, null,
-                `📥 Downloading: ${title}`
-            );
-            
-            await downloadFromTelegram(videoFileId, bot, tempFile);
-            
-            await ctx.telegram.editMessageText(
-                ctx.chat.id, messageId, null,
-                `📤 Uploading to YouTube: ${title}`
-            );
-            
-            const result = await uploadToYouTube(tempFile, title, description, hashtags);
-            
-            await ctx.telegram.editMessageText(
-                ctx.chat.id, messageId, null,
-                `✅ **Uploaded!**\n\n` +
-                `📹 ${title}\n` +
-                `🔗 https://www.youtube.com/watch?v=${result.id}\n` +
-                `🏷️ ${hashtags.join(' ') || 'No hashtags'}`,
-                { parse_mode: 'Markdown' }
-            );
-            
-        } catch(error) {
-            await ctx.telegram.editMessageText(
-                ctx.chat.id, messageId, null,
-                `❌ Failed: ${title}\nError: ${error.message}`
-            );
-            if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+}
+
+// Update video privacy
+async function updateVideoPrivacy(videoId, privacyStatus) {
+    try {
+        await youtubeAuth.videos.update({
+            part: 'status',
+            requestBody: {
+                id: videoId,
+                status: { privacyStatus: privacyStatus }
+            }
+        });
+        return true;
+    } catch(error) {
+        console.error(`Failed to update privacy: ${videoId}`, error.message);
+        return false;
+    }
+}
+
+// Get video views with cache
+async function getVideoViews(videoId) {
+    if (viewsCache.has(videoId)) {
+        const cached = viewsCache.get(videoId);
+        if (Date.now() - cached.time < 600000) {
+            return cached.views;
         }
     }
     
-    isDownloading = false;
-}
-
-// Get uploads playlist
-async function getUploadsPlaylistId(channelId) {
-    const youtube = getYoutube();
-    if(!youtube) return null;
-    const res = await youtube.channels.list({
-        part: 'contentDetails',
-        id: channelId
-    });
-    return res.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads || null;
-}
-
-async function getYourUploadsPlaylistId() {
-    const res = await youtubeAuth.channels.list({
-        part: 'contentDetails',
-        id: YOUR_CHANNEL_ID
-    });
-    return res.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads || null;
-}
-
-async function getLatestPost() {
-    const youtube = getYoutube();
-    if(!youtube) return null;
-    const playlistId = await getUploadsPlaylistId(TARGET_CHANNEL_ID);
-    if(!playlistId) return null;
-    const res = await youtube.playlistItems.list({
-        part: 'snippet',
-        playlistId: playlistId,
-        maxResults: 1
-    });
-    if(!res.data.items?.length) return null;
-    const latest = res.data.items[0];
-    return {
-        id: latest.snippet.resourceId.videoId,
-        title: latest.snippet.title,
-        url: `https://www.youtube.com/watch?v=${latest.snippet.resourceId.videoId}`
-    };
-}
-
-async function getScheduledShorts(force = false) {
-    const now = Date.now();
-    if(!force && scheduledCache && (now - lastCache) < 60000) return scheduledCache;
     try {
-        const playlistId = await getYourUploadsPlaylistId();
-        if(!playlistId) return [];
-        const res = await youtubeAuth.playlistItems.list({ 
-            part: 'snippet', 
-            playlistId: playlistId, 
-            maxResults: 50 
+        const youtube = getYoutube();
+        if (!youtube) return 0;
+        
+        const response = await youtube.videos.list({
+            part: 'statistics',
+            id: videoId
         });
-        const scheduled = [];
-        for(let i = 0; i < (res.data.items || []).length; i += 10) {
-            const batch = res.data.items.slice(i, i + 10);
-            const videoIds = batch.map(item => item.snippet.resourceId.videoId);
-            const videoRes = await youtubeAuth.videos.list({ 
-                part: 'status,snippet', 
-                id: videoIds.join(',') 
-            });
-            for(const video of videoRes.data.items || []) {
-                if(video?.status?.privacyStatus === 'private' && video?.status?.publishAt) {
-                    const publishTime = new Date(video.status.publishAt);
-                    if(publishTime > new Date()) {
-                        scheduled.push({ 
-                            id: video.id, 
-                            title: video.snippet.title, 
-                            time: publishTime 
-                        });
-                    }
+        
+        const views = parseInt(response.data.items?.[0]?.statistics?.viewCount || 0);
+        viewsCache.set(videoId, { views: views, time: Date.now() });
+        
+        return views;
+    } catch(error) {
+        return 0;
+    }
+}
+
+// Add video to supply
+async function addToSupply(videoId, title, hashtags, description, filePath) {
+    supplyVideos.push({
+        id: videoId,
+        title: title,
+        hashtags: hashtags,
+        description: description,
+        filePath: filePath,
+        status: 'scheduled',
+        addedTime: Date.now()
+    });
+    
+    videoFileCache.set(videoId, {
+        videoId: videoId,
+        title: title,
+        hashtags: hashtags,
+        description: description,
+        filePath: filePath,
+        reuploadCount: 0
+    });
+    
+    console.log(`📦 Added to supply: ${title} (${supplyVideos.length}/${MAX_SUPPLY})`);
+}
+
+// Get next video from supply
+function getNextFromSupply() {
+    if (supplyVideos.length === 0) return null;
+    return supplyVideos.shift();
+}
+
+// Monitor active video views
+async function monitorActiveVideoViews() {
+    if (!activeVideo) return;
+    
+    const timeElapsed = Date.now() - activeVideo.publishTime;
+    
+    if (timeElapsed >= VIEW_CHECK_INTERVAL && activeVideo.status === 'active') {
+        console.log(`\n📊 Checking views: ${activeVideo.title}`);
+        
+        const viewCount = await getVideoViews(activeVideo.id);
+        console.log(`   Views: ${viewCount} (Need ${VIEW_THRESHOLD}+)`);
+        
+        if (viewCount < VIEW_THRESHOLD) {
+            console.log(`⚠️ Low views! Recycling...`);
+            
+            await updateVideoPrivacy(activeVideo.id, 'private');
+            
+            const cachedVideo = videoFileCache.get(activeVideo.id);
+            
+            if (cachedVideo) {
+                const newVideo = await uploadToYouTube(
+                    cachedVideo.filePath,
+                    cachedVideo.title,
+                    cachedVideo.description,
+                    cachedVideo.hashtags
+                );
+                
+                if (newVideo) {
+                    videoFileCache.set(newVideo.id, {
+                        ...cachedVideo,
+                        videoId: newVideo.id,
+                        reuploadCount: (cachedVideo.reuploadCount || 0) + 1
+                    });
+                    videoFileCache.delete(activeVideo.id);
+                    
+                    supplyVideos.push({
+                        id: newVideo.id,
+                        title: newVideo.title,
+                        hashtags: cachedVideo.hashtags,
+                        description: cachedVideo.description,
+                        filePath: cachedVideo.filePath,
+                        status: 'scheduled',
+                        reuploadCount: (cachedVideo.reuploadCount || 0) + 1
+                    });
+                    
+                    console.log(`🔄 Recycled (Attempt ${cachedVideo.reuploadCount + 1})`);
                 }
             }
+            
+            const nextVideo = getNextFromSupply();
+            
+            if (nextVideo) {
+                await updateVideoPrivacy(nextVideo.id, 'public');
+                
+                activeVideo = {
+                    ...nextVideo,
+                    publishTime: Date.now(),
+                    status: 'active'
+                };
+                
+                console.log(`📤 Now showing: ${activeVideo.title}`);
+            } else {
+                activeVideo = null;
+                console.log(`📭 No videos in supply`);
+            }
+        } else {
+            console.log(`✅ Good views! Video stays public.`);
+            activeVideo.status = 'completed';
+            
+            const cachedVideo = videoFileCache.get(activeVideo.id);
+            if (cachedVideo && fs.existsSync(cachedVideo.filePath)) {
+                fs.unlinkSync(cachedVideo.filePath);
+                videoFileCache.delete(activeVideo.id);
+                console.log(`🗑️ Removed from server`);
+            }
+            
+            activeVideo = null;
         }
-        scheduled.sort((a,b) => a.time - b.time);
-        scheduledCache = scheduled;
-        lastCache = now;
-        return scheduled;
-    } catch(e) { return []; }
+    }
 }
 
-async function monitor() {
-    if(isProcessing) return;
-    isProcessing = true;
-    monitorCount++;
+// Monitor target channel
+async function monitorTargetChannel() {
+    const now = Date.now();
+    if (now - lastTargetCheck < 120000) return;
+    lastTargetCheck = now;
+    targetCheckCount++;
     
     try {
-        const latestPost = await getLatestPost();
-        if(!latestPost) return;
-        
-        if(latestPost.id !== lastVideoId && lastVideoId !== null) {
-            console.log(`🎬 New video detected!`);
-            const scheduled = await getScheduledShorts(true);
-            if(scheduled.length > 0) {
-                await youtubeAuth.videos.update({ 
-                    part: 'status', 
-                    requestBody: { 
-                        id: scheduled[0].id, 
-                        status: { privacyStatus: 'public' } 
-                    } 
-                });
-                scheduledCache = null;
-            }
-            lastVideoId = latestPost.id;
-        } else if(lastVideoId === null) {
-            lastVideoId = latestPost.id;
+        if (!channelCache || (now - channelCacheTime > 3600000)) {
+            const youtube = getYoutube();
+            if (!youtube) return;
+            
+            const res = await youtube.channels.list({
+                part: 'contentDetails',
+                id: TARGET_CHANNEL_ID
+            });
+            
+            channelCache = res.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+            channelCacheTime = now;
         }
-    } catch(e) {}
-    finally { isProcessing = false; }
+        
+        if (!channelCache) return;
+        
+        const youtube = getYoutube();
+        if (!youtube) return;
+        
+        const res = await youtube.playlistItems.list({
+            part: 'snippet',
+            playlistId: channelCache,
+            maxResults: 1
+        });
+        
+        if (!res.data.items?.length) return;
+        
+        const latestVideo = {
+            id: res.data.items[0].snippet.resourceId.videoId,
+            title: res.data.items[0].snippet.title
+        };
+        
+        if (latestVideo.id !== lastVideoId && lastVideoId !== null) {
+            console.log(`\n🎬 Target uploaded: ${latestVideo.title}`);
+            
+            const nextVideo = getNextFromSupply();
+            
+            if (nextVideo) {
+                console.log(`📤 Publishing: ${nextVideo.title}`);
+                await updateVideoPrivacy(nextVideo.id, 'public');
+                
+                activeVideo = {
+                    ...nextVideo,
+                    publishTime: Date.now(),
+                    status: 'active'
+                };
+                
+                console.log(`✅ Now public - will check in 1 hour`);
+            } else {
+                console.log(`📭 No videos in supply`);
+            }
+            
+            lastVideoId = latestVideo.id;
+        } else if (lastVideoId === null) {
+            lastVideoId = latestVideo.id;
+            console.log(`📝 Initialized`);
+        }
+        
+    } catch(error) {
+        console.error('Monitor error:', error.message);
+    }
+}
+
+// Process new video
+async function processNewVideo(videoFileId, title, hashtags, description, ctx, messageId) {
+    const tempVideoId = `temp_${Date.now()}`;
+    let tempFile = null;
+    
+    try {
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, messageId, null,
+            `📥 Downloading: ${title}`
+        );
+        
+        tempFile = await downloadAndSaveVideo(videoFileId, ctx.bot, tempVideoId);
+        
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, messageId, null,
+            `📤 Uploading to YouTube...`
+        );
+        
+        const result = await uploadToYouTube(tempFile, title, description, hashtags);
+        
+        const finalPath = path.join(TEMP_DIR, `${result.id}.mp4`);
+        fs.renameSync(tempFile, finalPath);
+        
+        await addToSupply(result.id, title, hashtags, description, finalPath);
+        
+        while (supplyVideos.length > MAX_SUPPLY) {
+            const excess = supplyVideos.pop();
+            console.log(`🗑️ Removing excess: ${excess.title}`);
+            await updateVideoPrivacy(excess.id, 'private');
+            if (videoFileCache.has(excess.id)) {
+                const cached = videoFileCache.get(excess.id);
+                if (fs.existsSync(cached.filePath)) fs.unlinkSync(cached.filePath);
+                videoFileCache.delete(excess.id);
+            }
+        }
+        
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, messageId, null,
+            `✅ **Added to Supply!**\n\n` +
+            `📹 ${title}\n` +
+            `📦 Supply: ${supplyVideos.length}/${MAX_SUPPLY}\n` +
+            `🔄 Will recycle if under ${VIEW_THRESHOLD} views\n` +
+            `🏷️ ${hashtags.join(' ') || 'No hashtags'}`,
+            { parse_mode: 'Markdown' }
+        );
+        
+    } catch(error) {
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, messageId, null,
+            `❌ Failed: ${title}\nError: ${error.message}`
+        );
+        if (tempFile && fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    }
 }
 
 async function refreshToken() {
     try {
         await oauth2Client.refreshAccessToken();
         youtubeAuth = google.youtube({ version: 'v3', auth: oauth2Client });
-    } catch(e) {}
+        console.log('✅ Token refreshed');
+    } catch(e) {
+        console.error('❌ Token refresh failed:', e.message);
+    }
 }
 
 // ============ TELEGRAM BOT ============
@@ -334,82 +485,84 @@ const bot = new Telegraf(BOT_TOKEN);
 
 const menu = { 
     reply_markup: { 
-        keyboard: [['📊 STATUS', '📥 QUEUE'], ['🔄 REFRESH', '📹 LATEST']], 
+        keyboard: [['📊 STATUS', '📦 SUPPLY'], ['🔄 REFRESH']], 
         resize_keyboard: true 
     } 
 };
 
-// Handle video messages (including forwarded)
 bot.on('video', async (ctx) => {
     const video = ctx.message.video;
     const caption = ctx.message.caption || '';
     const { title, hashtags, description } = extractVideoInfo(caption);
     
     const msg = await ctx.reply(
-        `🔄 Processing: ${title}\n📦 ${(video.file_size/1024/1024).toFixed(2)} MB\n🏷️ ${hashtags.join(' ') || 'No hashtags'}`,
+        `🔄 Processing: ${title}\n📦 ${(video.file_size/1024/1024).toFixed(2)} MB`,
         { parse_mode: 'Markdown' }
     );
     
-    downloadQueue.push({
-        videoFileId: video.file_id,
-        title, hashtags, description,
-        ctx, messageId: msg.message_id
-    });
-    
-    processDownloadQueue(bot);
+    await processNewVideo(video.file_id, title, hashtags, description, ctx, msg.message_id);
 });
 
 bot.command('start', async (ctx) => {
     ctx.reply(
-        `🤖 *YouTube Uploader Bot*\n\n` +
-        `Send or forward any video with title and hashtags in caption.\n\n` +
-        `Example caption:\n` +
-        `Every Fifa World Cup Football Evolution\n` +
-        `#fifa #football #worldcup\n\n` +
-        `The video will be downloaded, uploaded to YouTube, then deleted from server.`,
+        `🤖 *YouTube Supply Bot*\n\n` +
+        `**How it works:**\n` +
+        `1. Send video → Stored & uploaded (private)\n` +
+        `2. Added to supply (max ${MAX_SUPPLY})\n` +
+        `3. When target uploads → Your video goes public\n` +
+        `4. After 1 hour:\n` +
+        `   • Under ${VIEW_THRESHOLD} views → Recycled\n` +
+        `   • ${VIEW_THRESHOLD}+ views → Stays public\n\n` +
+        `📊 **Status:**\n` +
+        `📦 Supply: ${supplyVideos.length}/${MAX_SUPPLY}\n` +
+        `🎥 Active: ${activeVideo?.title || 'None'}\n` +
+        `🎯 Target: ${TARGET_CHANNEL_HANDLE}`,
         { parse_mode: 'Markdown', ...menu }
     );
 });
 
 bot.hears('📊 STATUS', async (ctx) => {
-    ctx.reply(
-        `📊 *Status*\n\n` +
-        `📥 Queue: ${downloadQueue.length}\n` +
-        `🔄 Checks: ${monitorCount}`,
-        { parse_mode: 'Markdown', ...menu }
-    );
+    let msg = `📊 *STATUS*\n\n` +
+        `📦 Supply: ${supplyVideos.length}/${MAX_SUPPLY}\n` +
+        `🎥 Active: ${activeVideo?.title || 'None'}\n` +
+        `💾 Cached: ${videoFileCache.size} videos\n` +
+        `🔄 Checks: ${monitorCount}\n` +
+        `📊 API Key ${currentKey+1} usage: ~${keyUsage[currentKey]} units\n` +
+        `🎯 Target: ${TARGET_CHANNEL_HANDLE}\n\n`;
+    
+    if (activeVideo) {
+        const timeActive = Math.floor((Date.now() - activeVideo.publishTime) / 60000);
+        const timeLeft = 60 - timeActive;
+        msg += `*Active:* ${activeVideo.title}\n⏰ Check in: ${timeLeft} minutes`;
+    }
+    
+    ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
 });
 
-bot.hears('📥 QUEUE', async (ctx) => {
-    if (downloadQueue.length === 0) {
-        ctx.reply('📭 Queue empty', menu);
+bot.hears('📦 SUPPLY', async (ctx) => {
+    if (supplyVideos.length === 0) {
+        ctx.reply('📭 Supply empty', menu);
     } else {
-        let msg = `📥 *Queue (${downloadQueue.length})*\n\n`;
-        downloadQueue.forEach((t, i) => {
-            msg += `${i+1}. ${t.title.substring(0, 40)}\n`;
+        let msg = `📦 *SUPPLY (${supplyVideos.length}/${MAX_SUPPLY})*\n\n`;
+        supplyVideos.forEach((video, i) => {
+            msg += `${i+1}. ${video.title.substring(0, 40)}\n`;
+            if (video.reuploadCount) msg += `   🔄 Re-uploaded: ${video.reuploadCount}x\n`;
         });
         ctx.reply(msg, { parse_mode: 'Markdown', ...menu });
     }
 });
 
 bot.hears('🔄 REFRESH', async (ctx) => {
-    scheduledCache = null;
-    ctx.reply('✅ Refreshed', menu);
+    ctx.reply(`✅ Refreshed\n📦 Supply: ${supplyVideos.length}/${MAX_SUPPLY}`, menu);
 });
 
-bot.hears('📹 LATEST', async (ctx) => {
-    const latest = await getLatestPost();
-    if (latest) {
-        ctx.reply(`📹 Latest from target\n${latest.title}\n${latest.url}`, menu);
-    } else {
-        ctx.reply('❌ Cannot fetch', menu);
-    }
-});
-
-// Start everything
+// Start monitoring
 setInterval(refreshToken, 45 * 60 * 1000);
-setInterval(() => processDownloadQueue(bot), 5000);
-setInterval(monitor, 30000);
+setInterval(monitorTargetChannel, 30000);
+setInterval(monitorActiveVideoViews, 60000);
 
 bot.launch();
-console.log('🚀 Bot started! Send videos with captions!');
+console.log('🚀 YouTube Supply Bot Started!');
+console.log(`📦 Max supply: ${MAX_SUPPLY} videos`);
+console.log(`🎯 Target: ${TARGET_CHANNEL_HANDLE}`);
+console.log(`📊 View threshold: ${VIEW_THRESHOLD} views in 1 hour`);
