@@ -1308,3 +1308,271 @@ loadAI().then(() => {
 }).catch(error => {
     console.error('❌ Failed to start:', error);
 });
+// ============ FIX: OAuth Callback Handler ============
+// Replace the existing /oauth2callback route with this
+app.get('/oauth2callback', async (req, res) => {
+    const { code } = req.query;
+    if (!code) return res.send('❌ No code received');
+    
+    try {
+        const { tokens } = await oauth2Client.getToken(code);
+        oauth2Client.setCredentials(tokens);
+        
+        const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+        const channelRes = await youtube.channels.list({
+            part: 'snippet',
+            mine: true
+        });
+        
+        if (!channelRes.data.items || channelRes.data.items.length === 0) {
+            return res.send('❌ No YouTube channel found');
+        }
+        
+        const channelId = channelRes.data.items[0].id;
+        const channelName = channelRes.data.items[0].snippet.title;
+        
+        // Get userId from session or state
+        const userId = req.session.userId || req.query.state;
+        
+        if (userId && userSessions.has(userId)) {
+            const session = userSessions.get(userId);
+            session.mainAccount = {
+                channelId: channelId,
+                channelName: channelName,
+                oauthClient: oauth2Client,
+                youtube: youtube,
+                tokens: tokens,
+                authenticated: true
+            };
+            userSessions.set(userId, session);
+            
+            // Send success message to Telegram
+            try {
+                await bot.telegram.sendMessage(
+                    userId,
+                    `✅ **YouTube Login Successful!**\n\n` +
+                    `📺 Channel: ${channelName}\n` +
+                    `📦 Max file: ${MAX_FILE_SIZE_MB}MB\n\n` +
+                    `Send /start to see the menu.`,
+                    { parse_mode: 'Markdown' }
+                );
+            } catch(e) {
+                console.log('Could not send message:', e.message);
+            }
+        } else {
+            // Create new session if needed
+            const newUserId = userId || `user_${Date.now()}`;
+            if (!userSessions.has(newUserId)) {
+                userSessions.set(newUserId, {
+                    mainAccount: {
+                        channelId: channelId,
+                        channelName: channelName,
+                        oauthClient: oauth2Client,
+                        youtube: youtube,
+                        tokens: tokens,
+                        authenticated: true
+                    },
+                    subscriptionVerified: false,
+                    uploadCount: 0,
+                    totalUploadsAllowed: MAX_UPLOADS,
+                    linkedAccounts: [],
+                    telegramVerified: false,
+                    aiMode: null,
+                    analysisMode: null,
+                    chatMode: null
+                });
+            }
+        }
+        
+        res.send(`
+            <html>
+                <head><title>Login Successful</title></head>
+                <body style="font-family: Arial; text-align: center; padding: 50px;">
+                    <h1>✅ Login Successful!</h1>
+                    <p>Channel: <strong>${channelName}</strong></p>
+                    <p>Max file: ${MAX_FILE_SIZE_MB}MB</p>
+                    <p>You can now close this window.</p>
+                    <p>Send <strong>/start</strong> to the bot.</p>
+                    <p><a href="/">Go to Home</a></p>
+                </body>
+            </html>
+        `);
+    } catch(error) {
+        console.error('OAuth error:', error);
+        res.send(`❌ Login failed: ${error.message}`);
+    }
+});
+
+// ============ FIX: Auth Route with User ID ============
+// Replace the existing /auth route with this
+app.get('/auth', (req, res) => {
+    const userId = req.query.userId || req.session.userId;
+    if (userId) {
+        req.session.userId = userId;
+    }
+    
+    const authUrl = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        scope: [
+            'https://www.googleapis.com/auth/youtube.upload',
+            'https://www.googleapis.com/auth/youtube',
+            'https://www.googleapis.com/auth/youtube.readonly'
+        ],
+        prompt: 'consent',
+        state: userId || ''
+    });
+    res.redirect(authUrl);
+});
+
+// ============ FIX: Start Command with Login Flow ============
+// Replace the existing start command with this
+bot.start(async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!userSessions.has(userId)) {
+        userSessions.set(userId, {
+            mainAccount: null,
+            subscriptionVerified: false,
+            uploadCount: 0,
+            totalUploadsAllowed: MAX_UPLOADS,
+            linkedAccounts: [],
+            telegramVerified: false,
+            aiMode: null,
+            analysisMode: null,
+            chatMode: null
+        });
+    }
+    
+    const session = userSessions.get(userId);
+    const isTelegramMember = await checkTelegramMembership(ctx.from.id);
+    
+    if (!isTelegramMember) {
+        return ctx.reply(
+            `❌ *Join ${REQUIRED_TELEGRAM_CHANNEL} first!*`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('📢 Join', `https://t.me/${REQUIRED_TELEGRAM_CHANNEL.replace('@', '')}`)],
+                [Markup.button.callback('✅ Verify', 'verify_telegram')]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+    }
+    
+    session.telegramVerified = true;
+    userSessions.set(userId, session);
+    
+    // Check if already logged in
+    if (session.mainAccount && session.mainAccount.authenticated) {
+        await showMainMenu(ctx, userId);
+        return;
+    }
+    
+    // Not logged in - show login button
+    const authUrl = `${REDIRECT_URI.replace('/oauth2callback', '/auth')}?userId=${userId}`;
+    
+    await ctx.reply(
+        `✅ Telegram verified!\n\n` +
+        `Now login with YouTube to start uploading.\n\n` +
+        `🔐 Click the button below to login.`,
+        Markup.inlineKeyboard([
+            [Markup.button.url('🔑 Login with YouTube', authUrl)]
+        ])
+    );
+});
+
+// ============ FIX: Show Main Menu After Login ============
+// Make sure showMainMenu function exists and works
+async function showMainMenu(ctx, userId) {
+    const session = userSessions.get(userId);
+    if (!session || !session.mainAccount || !session.mainAccount.authenticated) {
+        return ctx.reply('❌ Please login first.');
+    }
+    
+    const remaining = getRemainingUploads(session);
+    const inviteCount = inviteTracker.has(userId) ? inviteTracker.get(userId).invitedUsers.length : 0;
+    
+    let msg = `👋 *${session.mainAccount?.channelName || 'User'}*\n\n`;
+    msg += `📤 Uploads: ${session.uploadCount || 0}/${session.totalUploadsAllowed}\n`;
+    msg += `📊 Remaining: ${remaining}\n`;
+    msg += `👥 Invites: ${inviteCount}\n`;
+    msg += `📦 Max file: ${MAX_FILE_SIZE_MB}MB\n`;
+    msg += `🤖 AI: ${aiReady ? '✅' : '⏳'}\n\n`;
+    msg += `💬 *Chat, Summarize, Get Advice!*`;
+    
+    try {
+        await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...mainMenu });
+    } catch(e) {
+        await ctx.reply(msg, { parse_mode: 'Markdown', ...mainMenu });
+    }
+}
+
+// ============ FIX: Verification Button ============
+// Make sure verify button works
+bot.action('verify_telegram', async (ctx) => {
+    const isMember = await checkTelegramMembership(ctx.from.id);
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    
+    if (isMember) {
+        if (session) session.telegramVerified = true;
+        await ctx.editMessageText(
+            `✅ Telegram verified!\n\n` +
+            `Now login with YouTube to start uploading.`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('🔑 Login with YouTube', `${REDIRECT_URI.replace('/oauth2callback', '/auth')}?userId=${userId}`)]
+            ])
+        );
+        await ctx.answerCbQuery('Verified!');
+    } else {
+        await ctx.answerCbQuery('❌ Not a member! Join first.', { show_alert: true });
+    }
+});
+
+// ============ FIX: Debug Status Command ============
+bot.command('status', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    
+    let msg = `📊 *Your Status*\n\n`;
+    msg += `👤 User ID: ${userId}\n`;
+    msg += `✅ Telegram: ${session?.telegramVerified ? '✅' : '❌'}\n`;
+    msg += `✅ YouTube: ${session?.mainAccount?.authenticated ? '✅' : '❌'}\n`;
+    
+    if (session?.mainAccount?.authenticated) {
+        msg += `📺 Channel: ${session.mainAccount.channelName}\n`;
+        msg += `📤 Uploads: ${session.uploadCount || 0}/${session.totalUploadsAllowed}\n`;
+        msg += `📊 Remaining: ${getRemainingUploads(session)}\n`;
+    } else {
+        msg += `\n🔑 *Login to start uploading*\n`;
+        const authUrl = `${REDIRECT_URI.replace('/oauth2callback', '/auth')}?userId=${userId}`;
+        msg += `\n[Login Link](${authUrl})`;
+    }
+    
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+// ============ FIX: Login Check Middleware ============
+// Add this to check login status on every action
+async function requireLogin(ctx, next) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    
+    if (!session || !session.mainAccount || !session.mainAccount.authenticated) {
+        const authUrl = `${REDIRECT_URI.replace('/oauth2callback', '/auth')}?userId=${userId}`;
+        await ctx.reply(
+            `❌ *Please Login First*\n\n` +
+            `You need to login with YouTube to use this feature.\n\n` +
+            `🔐 Click the button below to login.`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('🔑 Login with YouTube', authUrl)]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+        return;
+    }
+    
+    return next(ctx);
+}
+
+console.log('✅ All fixes applied!');
+console.log('📌 Make sure your bot is admin in @bot_Farming');
+console.log('🔄 After login, send /start to see the menu');
