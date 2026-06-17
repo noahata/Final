@@ -672,3 +672,207 @@ bot.action('analyze_channel', async (ctx) => {
     userSessions.set(userId, session);
     await ctx.editMessageText(`📊 Send me a YouTube channel link or ID.\nType /cancel to exit.`);
 });
+// ============ TEXT HANDLERS ============
+
+bot.on('text', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const text = ctx.message.text;
+    if (text === '/cancel') {
+        if (session) { session.aiMode = null; session.analysisMode = null; session.chatMode = null; userSessions.set(userId, session); }
+        return ctx.reply('✅ Cancelled.', mainMenu);
+    }
+    if (!session) return;
+    if (session.chatMode === 'chat') await handleChat(ctx, text);
+    else if (session.chatMode === 'summarize') await handleSummarize(ctx, text);
+    else if (session.chatMode === 'advice') await handleAdvice(ctx, text);
+    else if (session.aiMode === 'title') await handleAITitle(ctx, text);
+    else if (session.aiMode === 'description') await handleAIDescription(ctx, text);
+    else if (session.aiMode === 'tags') await handleAITags(ctx, text);
+    else if (session.analysisMode === 'video') await handleVideoAnalysis(ctx, text);
+    else if (session.analysisMode === 'channel') await handleChannelAnalysis(ctx, text);
+});
+
+// ============ HANDLERS ============
+
+async function handleChat(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const msg = await ctx.reply(`💬 Thinking...⏳`);
+    const response = await chatWithAI(text);
+    if (response && !response.includes('Loading')) {
+        session.chatMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `💬 *Response*\n\n${response}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    } else {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            response || `❌ Try again.`, mainMenu
+        );
+    }
+}
+
+async function handleSummarize(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const msg = await ctx.reply(`📝 Summarizing...⏳`);
+    const summary = await summarizeContent(text);
+    if (summary && !summary.includes('Loading')) {
+        session.chatMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `📝 *Summary*\n\n${summary}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    } else {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ Failed. Try again.`, mainMenu
+        );
+    }
+}
+
+async function handleAdvice(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const msg = await ctx.reply(`💡 Getting advice...⏳`);
+    const advice = await getAIAdvice(text);
+    if (advice && !advice.includes('Loading')) {
+        session.chatMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `💡 *Advice*\n\n${advice}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    } else {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ Failed. Try again.`, mainMenu
+        );
+    }
+}
+
+async function handleAITitle(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const msg = await ctx.reply(`🎯 Generating titles...⏳`);
+    const titles = await generateTitles(text);
+    if (titles) {
+        session.aiMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `🎯 *Titles*\n\n${titles.join('\n')}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    } else {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ Failed. Try again.`, mainMenu
+        );
+    }
+}
+
+async function handleAIDescription(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const parts = text.split('|');
+    const title = parts[0]?.trim() || text;
+    const topic = parts[1]?.trim() || title;
+    const keywords = parts[2]?.trim()?.split(',').map(k => k.trim()) || [];
+    const msg = await ctx.reply(`📝 Generating description...⏳`);
+    const description = await generateDescription(topic, keywords, title);
+    if (description) {
+        session.aiMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `📝 *Description*\n\n${description}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    } else {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ Failed. Try again.`, mainMenu
+        );
+    }
+}
+
+async function handleAITags(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const msg = await ctx.reply(`🏷️ Generating tags...⏳`);
+    const tags = await generateTags(text);
+    if (tags) {
+        session.aiMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `🏷️ *Tags*\n\n${tags.join(' ')}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    } else {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ Failed. Try again.`, mainMenu
+        );
+    }
+}
+
+async function handleVideoAnalysis(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    let videoId = text;
+    const urlMatch = text.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+    if (urlMatch) videoId = urlMatch[1];
+    const youtube = getYoutube();
+    if (!youtube) return ctx.reply(`❌ API keys exhausted.`);
+    const msg = await ctx.reply(`🔍 Analyzing...⏳`);
+    try {
+        const videoRes = await youtube.videos.list({ part: 'snippet,statistics,contentDetails', id: videoId });
+        if (!videoRes.data.items || videoRes.data.items.length === 0) return ctx.reply('❌ Video not found.');
+        const video = videoRes.data.items[0];
+        const stats = video.statistics || {};
+        let msgText = `🔍 *Video Analysis*\n\n📹 ${video.snippet.title}\n📺 ${video.snippet.channelTitle}\n📅 ${new Date(video.snippet.publishedAt).toLocaleString()}\n⏱️ ${parseDuration(video.contentDetails.duration)}\n👁️ ${formatNumber(parseInt(stats.viewCount || 0))}\n👍 ${formatNumber(parseInt(stats.likeCount || 0))}\n💬 ${formatNumber(parseInt(stats.commentCount || 0))}\n\n🔗 https://www.youtube.com/watch?v=${videoId}`;
+        session.analysisMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, msgText, { parse_mode: 'Markdown', ...mainMenu });
+    } catch(error) {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `❌ Error: ${error.message}`, mainMenu);
+    }
+}
+
+async function handleChannelAnalysis(ctx, text) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    let channelId = text;
+    const handleMatch = text.match(/(?:youtube\.com\/@|youtube\.com\/channel\/)([a-zA-Z0-9_-]+)/);
+    if (handleMatch) channelId = handleMatch[1];
+    const youtube = getYoutube();
+    if (!youtube) return ctx.reply(`❌ API keys exhausted.`);
+    const msg = await ctx.reply(`📊 Analyzing...⏳`);
+    try {
+        const channelRes = await youtube.channels.list({ part: 'snippet,statistics,contentDetails', id: channelId });
+        if (!channelRes.data.items || channelRes.data.items.length === 0) return ctx.reply('❌ Channel not found.');
+        const channel = channelRes.data.items[0];
+        const stats = channel.statistics || {};
+        let msgText = `📊 *Channel Analysis*\n\n📺 ${channel.snippet.title}\n👥 ${formatNumber(parseInt(stats.subscriberCount || 0))}\n🎬 ${formatNumber(parseInt(stats.videoCount || 0))}\n👁️ ${formatNumber(parseInt(stats.viewCount || 0))}\n📅 ${new Date(channel.snippet.publishedAt).toLocaleString()}\n🌍 ${channel.snippet.country || 'Unknown'}\n\n🔗 https://www.youtube.com/channel/${channelId}`;
+        session.analysisMode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, msgText, { parse_mode: 'Markdown', ...mainMenu });
+    } catch(error) {
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, `❌ Error: ${error.message}`, mainMenu);
+    }
+}
+
+// ============ AI STATUS COMMAND ============
+
+bot.command('aistatus', async (ctx) => {
+    let msg = `🤖 *AI Status*\n\n`;
+    if (aiReady) {
+        msg += `✅ Status: **Ready**\n⚡ Speed: **Fast**\n📦 Model: DistilGPT2 (82MB)\n`;
+    } else if (aiLoading) {
+        const filled = Math.floor(loadingProgress / 10);
+        const empty = 10 - filled;
+        const progressBar = '█'.repeat(filled) + '░'.repeat(empty);
+        msg += `⏳ Status: **Loading...**\n📊 Progress: ${progressBar} ${loadingProgress}%\n📝 Message: ${loadingMessage}\n`;
+    } else {
+        msg += `⚠️ Status: **Not Loaded**\n🔄 Retrying...\n`;
+    }
+    msg += `\n🔄 AI will auto-retry if not ready.`;
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+});
