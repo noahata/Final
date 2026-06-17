@@ -18,7 +18,6 @@ const path = require('path');
 const axios = require('axios');
 const session = require('express-session');
 const cors = require('cors');
-const { pipeline } = require('@xenova/transformers');
 
 // ============ CREDENTIALS ============
 const BOT_TOKEN = process.env.BOT_TOKEN;
