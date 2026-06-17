@@ -1,3 +1,15 @@
+// Add this as the FIRST line after imports or at the top
+if (process.env.USE_HF_API === 'true') {
+    const ai = require('./ai-api.js');
+    // Override functions
+    global.chatWithAI = ai.chatWithAI;
+    global.summarizeContent = ai.summarizeContent;
+    global.getAIAdvice = ai.getAIAdvice;
+    global.generateTitles = ai.generateTitles;
+    global.generateDescription = ai.generateDescription;
+    global.generateTags = ai.generateTags;
+    console.log('✅ Using HuggingFace API AI');
+}
 const { Telegraf, Markup } = require('telegraf');
 const { google } = require('googleapis');
 const express = require('express');
