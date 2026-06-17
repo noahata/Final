@@ -1,7 +1,7 @@
 {
-  "name": "youtube-bot",
-  "version": "1.0.0",
-  "description": "YouTube upload bot for Telegram",
+  "name": "youtube-bot-with-ai",
+  "version": "2.0.0",
+  "description": "YouTube Upload Bot with DistilGPT2 AI",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,7 +10,10 @@
     "telegraf": "^4.15.3",
     "googleapis": "^126.0.0",
     "express": "^4.18.2",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "express-session": "^1.17.3",
+    "@xenova/transformers": "^2.0.0",
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"
