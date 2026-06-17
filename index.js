@@ -1008,3 +1008,303 @@ async function handleChannelAnalysis(ctx, text) {
         );
     }
 }
+// ============ VIDEO UPLOAD HANDLER ============
+bot.on('video', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    
+    if (!session || !session.mainAccount) return ctx.reply('❌ Login first.');
+    if (isUploading) return ctx.reply(`⏳ Another upload in progress.`);
+    if (!session.subscriptionVerified) return ctx.reply(`❌ Subscribe first!`);
+    
+    const remaining = getRemainingUploads(session);
+    if (remaining <= 0) return ctx.reply(`❌ No uploads remaining!`);
+    
+    const video = ctx.message.video;
+    const fileSizeMB = video.file_size / 1024 / 1024;
+    
+    if (fileSizeMB > MAX_FILE_SIZE_MB) {
+        return ctx.reply(
+            `❌ *Video Too Large!*\n\n📦 Your video: ${fileSizeMB.toFixed(2)}MB\n📦 Max: ${MAX_FILE_SIZE_MB}MB\n\nPlease compress your video.`
+        );
+    }
+    
+    const tempFiles = fs.readdirSync(TEMP_DIR);
+    let totalSize = 0;
+    for (const file of tempFiles) {
+        const filePath = path.join(TEMP_DIR, file);
+        const stats = fs.statSync(filePath);
+        totalSize += stats.size;
+    }
+    const currentUsageMB = totalSize / 1024 / 1024;
+    const freeSpaceMB = 350 - currentUsageMB;
+    
+    if (fileSizeMB > freeSpaceMB) {
+        clearAllTempFiles();
+        const newFreeSpace = 350 - (fs.readdirSync(TEMP_DIR).reduce((acc, file) => {
+            const filePath = path.join(TEMP_DIR, file);
+            const stats = fs.statSync(filePath);
+            return acc + stats.size;
+        }, 0) / 1024 / 1024);
+        
+        if (fileSizeMB > newFreeSpace) {
+            return ctx.reply(
+                `❌ *Not Enough Space!*\n\n📦 Video: ${fileSizeMB.toFixed(2)}MB\n📊 Available: ${newFreeSpace.toFixed(2)}MB\n\nTry again later.`
+            );
+        }
+    }
+    
+    clearUserTempFiles(userId);
+    isUploading = true;
+    currentUploader = userId;
+    
+    const caption = ctx.message.caption || '';
+    const lines = caption.split('\n');
+    let title = lines[0] || `Video ${Date.now()}`;
+    let description = lines.slice(1).join('\n') || title;
+    
+    const msg = await ctx.reply(
+        `📥 Downloading...\n\n📹 ${title}\n📦 ${fileSizeMB.toFixed(2)} MB\n📊 Remaining: ${remaining - 1}\n💾 Free: ${freeSpaceMB.toFixed(2)}MB`
+    );
+    
+    try {
+        const fileLink = await ctx.telegram.getFileLink(video.file_id);
+        const tempPath = path.join(TEMP_DIR, `${userId}_${Date.now()}.mp4`);
+        
+        const response = await axios({
+            method: 'GET',
+            url: fileLink.href,
+            responseType: 'stream',
+            maxContentLength: MAX_FILE_SIZE_MB * 1024 * 1024
+        });
+        
+        const writer = fs.createWriteStream(tempPath);
+        response.data.pipe(writer);
+        await new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+        });
+        
+        session.tempFile = tempPath;
+        session.videoData = { title, description };
+        userSessions.set(userId, session);
+        
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `✅ Ready!\n\nChoose option:`,
+            Markup.inlineKeyboard([
+                [Markup.button.callback('🌐 Public', 'upload_public')],
+                [Markup.button.callback('🔒 Private', 'upload_private')],
+                [Markup.button.callback('📅 Schedule', 'upload_schedule')],
+                [Markup.button.callback('❌ Cancel', 'upload_cancel')]
+            ])
+        );
+    } catch(error) {
+        isUploading = false;
+        currentUploader = null;
+        clearUserTempFiles(userId);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ Error: ${error.message}`
+        );
+    }
+});
+
+// ============ UPLOAD HANDLERS ============
+bot.action('upload_public', async (ctx) => await handleUpload(ctx, 'public'));
+bot.action('upload_private', async (ctx) => await handleUpload(ctx, 'private'));
+bot.action('upload_schedule', async (ctx) => await handleUpload(ctx, 'scheduled'));
+
+bot.action('upload_cancel', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (session && session.tempFile && fs.existsSync(session.tempFile)) {
+        fs.unlinkSync(session.tempFile);
+    }
+    if (session) {
+        session.tempFile = null;
+        session.videoData = null;
+        userSessions.set(userId, session);
+    }
+    isUploading = false;
+    currentUploader = null;
+    await ctx.editMessageText('❌ Cancelled');
+    await ctx.answerCbQuery('Cancelled');
+});
+
+async function handleUpload(ctx, privacy) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    
+    if (!session || !session.tempFile) {
+        isUploading = false;
+        currentUploader = null;
+        return ctx.reply('❌ No video found.');
+    }
+    
+    await ctx.editMessageText(`📤 Uploading (${privacy})...⏳`);
+    await ctx.answerCbQuery('Uploading...');
+    
+    try {
+        const { title, description } = session.videoData;
+        
+        const requestBody = {
+            snippet: {
+                title: title.substring(0, 100),
+                description: description.substring(0, 5000),
+                categoryId: '22'
+            },
+            status: {
+                privacyStatus: privacy === 'scheduled' ? 'private' : privacy,
+                selfDeclaredMadeForKids: false
+            }
+        };
+        
+        if (privacy === 'scheduled') {
+            const publishDate = new Date();
+            publishDate.setDate(publishDate.getDate() + 1);
+            requestBody.status.publishAt = publishDate.toISOString();
+        }
+        
+        const fileStream = fs.createReadStream(session.tempFile);
+        const response = await session.mainAccount.youtube.videos.insert({
+            part: 'snippet,status',
+            requestBody: requestBody,
+            media: { body: fileStream }
+        });
+        
+        fileStream.close();
+        
+        session.uploadCount = (session.uploadCount || 0) + 1;
+        
+        if (fs.existsSync(session.tempFile)) {
+            fs.unlinkSync(session.tempFile);
+        }
+        session.tempFile = null;
+        session.videoData = null;
+        userSessions.set(userId, session);
+        
+        clearAllTempFiles();
+        isUploading = false;
+        currentUploader = null;
+        
+        const statusText = privacy === 'public' ? '🌐 Public' : privacy === 'private' ? '🔒 Private' : '📅 Scheduled';
+        
+        await ctx.editMessageText(
+            `✅ **Upload Successful!**\n\n📹 ${title}\n🔗 https://www.youtube.com/watch?v=${response.data.id}\n📊 ${statusText}\n📤 Remaining: ${getRemainingUploads(session)}\n\nSend another video!`,
+            { parse_mode: 'Markdown' }
+        );
+    } catch(error) {
+        if (session.tempFile && fs.existsSync(session.tempFile)) {
+            fs.unlinkSync(session.tempFile);
+            session.tempFile = null;
+            session.videoData = null;
+            userSessions.set(userId, session);
+        }
+        isUploading = false;
+        currentUploader = null;
+        await ctx.editMessageText(`❌ Upload failed: ${error.message}`);
+    }
+}
+
+// ============ HANDLE REFERRALS ============
+bot.start(async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const refMatch = ctx.message.text.match(/\/start\s+ref_(\d+)/);
+    
+    if (refMatch) {
+        const inviterId = refMatch[1];
+        if (inviterId !== userId) {
+            const invited = trackInvite(inviterId, userId);
+            if (invited) {
+                const inviterSession = userSessions.get(inviterId);
+                if (inviterSession) {
+                    inviterSession.totalUploadsAllowed = (inviterSession.totalUploadsAllowed || MAX_UPLOADS) + INVITE_BONUS;
+                    userSessions.set(inviterId, inviterSession);
+                }
+                await ctx.reply(`🎉 Welcome! Inviter earned +${INVITE_BONUS} upload!`);
+            }
+        }
+    }
+    
+    if (!userSessions.has(userId)) {
+        userSessions.set(userId, {
+            mainAccount: null,
+            subscriptionVerified: false,
+            uploadCount: 0,
+            totalUploadsAllowed: MAX_UPLOADS,
+            linkedAccounts: [],
+            telegramVerified: false,
+            aiMode: null,
+            analysisMode: null,
+            chatMode: null
+        });
+    }
+    
+    const session = userSessions.get(userId);
+    const isTelegramMember = await checkTelegramMembership(ctx.from.id);
+    
+    if (!isTelegramMember) {
+        return ctx.reply(
+            `❌ Join ${REQUIRED_TELEGRAM_CHANNEL} first!`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('📢 Join', `https://t.me/${REQUIRED_TELEGRAM_CHANNEL.replace('@', '')}`)],
+                [Markup.button.callback('✅ Verify', 'verify_telegram')]
+            ])
+        );
+    }
+    
+    session.telegramVerified = true;
+    userSessions.set(userId, session);
+    
+    if (!session.mainAccount || !session.mainAccount.authenticated) {
+        return ctx.reply(
+            `✅ Verified!\n\nLogin with YouTube:`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('🔑 Login', `${REDIRECT_URI.replace('/oauth2callback', '/auth')}`)]
+            ])
+        );
+    }
+    
+    await showMainMenu(ctx, userId);
+});
+
+// ============ START SERVER ============
+
+loadAI().then(() => {
+    bot.launch().then(() => {
+        console.log('🤖 Bot started!');
+        console.log(`📦 Max file size: ${MAX_FILE_SIZE_MB}MB`);
+    });
+    
+    app.listen(PORT, () => {
+        console.log(`🌐 Server on port ${PORT}`);
+        console.log(`🔗 OAuth: ${REDIRECT_URI}`);
+        console.log(`🧠 AI: ${aiReady ? '✅ Ready' : '⏳ Loading...'}`);
+    });
+    
+    clearAllTempFiles();
+    
+    setInterval(() => {
+        const files = fs.readdirSync(TEMP_DIR);
+        const now = Date.now();
+        let deleted = 0;
+        for (const file of files) {
+            const filePath = path.join(TEMP_DIR, file);
+            try {
+                const stats = fs.statSync(filePath);
+                const age = (now - stats.mtimeMs) / 1000 / 60;
+                if (age > 60) {
+                    fs.unlinkSync(filePath);
+                    deleted++;
+                }
+            } catch(e) {}
+        }
+        if (deleted > 0) console.log(`🗑️ Cleaned up ${deleted} old temp files`);
+    }, 60000);
+    
+    console.log('🚀 YouTube Bot Ready!');
+    console.log(`📦 Max upload: ${MAX_FILE_SIZE_MB}MB`);
+    console.log(`🤖 AI: ${aiReady ? '✅ Ready' : '⏳ Loading...'}`);
+    console.log(`🆘 Contact: ${DEVELOPER_CONTACT}`);
+}).catch(error => {
+    console.error('❌ Failed to start:', error);
+});
