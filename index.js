@@ -1,3 +1,12 @@
+const { Telegraf, Markup } = require('telegraf');
+const { google } = require('googleapis');
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
+const session = require('express-session');
+const cors = require('cors');
+const { HfInference } = require('@huggingface/inference'); const hf = new HfInference(process.env.HF_TOKEN || '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'); global.chatWithAI = async (msg) => { try { const r = await hf.textGeneration({ model: 'distilgpt2', inputs: `User: ${msg}\nAssistant:`, parameters: { max_new_tokens: 100, temperature: 0.8 } }); return r.generated_text?.replace(`User: ${msg}\nAssistant:`, '').trim() || "Got it!"; } catch(e) { return "⚠️ AI error. Try again."; } }; global.summarizeContent = async (text) => { try { const r = await hf.textGeneration({ model: 'distilgpt2', inputs: `Summary: ${text.substring(0, 200)}\n`, parameters: { max_new_tokens: 80, temperature: 0.5 } }); return r.generated_text?.replace(`Summary: ${text.substring(0, 200)}\n`, '').trim() || "Summarized!"; } catch(e) { return "Quick summary: " + text.substring(0, 100) + "..."; } }; global.getAIAdvice = async (topic) => { try { const r = await hf.textGeneration({ model: 'distilgpt2', inputs: `Advice for ${topic}:`, parameters: { max_new_tokens: 80, temperature: 0.7 } }); return r.generated_text?.replace(`Advice for ${topic}:`, '').trim() || "Keep going!"; } catch(e) { return "💡 Stay consistent!"; } }; global.generateTitles = async (topic) => { try { const r = await hf.textGeneration({ model: 'distilgpt2', inputs: `Titles for ${topic}:`, parameters: { max_new_tokens: 80, temperature: 0.9 } }); const t = r.generated_text?.split('\n').filter(l => l.trim().length > 5).slice(0, 3).map(l => l.replace(/^\d+\.\s*/, '').trim()) || [`${topic} - Amazing!`, `${topic} - Best Ever!`]; return t; } catch(e) { return [`${topic} - Best Video!`, `${topic} - Amazing!`]; } }; global.generateDescription = async (topic, keywords = [], title = '') => { try { const r = await hf.textGeneration({ model: 'distilgpt2', inputs: `Description for ${title}:`, parameters: { max_new_tokens: 100, temperature: 0.8 } }); return r.generated_text?.replace(`Description for ${title}:`, '').trim() || `Amazing ${topic} video!`; } catch(e) { return `🔥 Amazing ${topic} video!`; } }; global.generateTags = async (topic) => { try { const r = await hf.textGeneration({ model: 'distilgpt2', inputs: `Tags for ${topic}:`, parameters: { max_new_tokens: 60, temperature: 0.7 } }); const tags = r.generated_text?.replace(`Tags for ${topic}:`, '').trim().split(/\s+/).filter(t => t.startsWith('#')).slice(0, 5) || [`#${topic}`, `#${topic}Video`, `#Trending`]; return tags; } catch(e) { return [`#${topic}`, `#${topic}Video`, `#Trending`]; } }; global.aiReady = true; console.log('✅ HuggingFace AI Ready!');
 // Add this as the FIRST line after imports or at the top
 if (process.env.USE_HF_API === 'true') {
     const ai = require('./ai-api.js');
@@ -8,17 +17,7 @@ if (process.env.USE_HF_API === 'true') {
     global.generateTitles = ai.generateTitles;
     global.generateDescription = ai.generateDescription;
     global.generateTags = ai.generateTags;
-    console.log('✅ Using HuggingFace API AI');
-}
-const { Telegraf, Markup } = require('telegraf');
-const { google } = require('googleapis');
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios');
-const session = require('express-session');
-const cors = require('cors');
-
+    console.log('✅ Using HuggingFace API AI');}
 // ============ CREDENTIALS ============
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = '39782137338-leo8rmrpic812o2klvsrmgk84o10d4j4.apps.googleusercontent.com';
