@@ -35,17 +35,17 @@ const INVITES_TO_ADD_ACCOUNT = 5;
 const DEVELOPER_CONTACT = '@Ace_spy';
 const MAX_FILE_SIZE_MB = 300;
 
-// ============ SPONSOR CONFIG ============
-const SPONSOR_CHANNEL = '@GreenAppletgBot'; // Green Apple Sponsor
-const SPONSOR_LINK = 'https://t.me/GreenAppletgBot/play?startapp=6596414316';
+// ============ SPONSOR CONFIG (Green Apple) ============
 const SPONSOR_NAME = 'Green Apple 🍏';
+const SPONSOR_LINK = 'https://t.me/GreenAppletgBot/play?startapp=6596414316';
+const SPONSOR_LOGO = 'https://via.placeholder.com/100x100/4CAF50/FFFFFF?text=🍏';
+const SPONSOR_DESCRIPTION = 'Support our sponsor by trying Green Apple!';
 const SPONSORS = [];
 const BROADCAST_HISTORY = [];
 
 // ============ GREEN APPLE CONFIG ============
 const GREEN_APPLE_TOKENS = new Map();
 const YOUR_BOT_USERNAME = process.env.BOT_USERNAME || 'final_boss_bot';
-const GREEN_APPLE_BOT_URL = 'https://t.me/GreenAppletgBot/play?startapp=6596414316';
 
 // ============ EXPRESS SETUP ============
 const PORT = process.env.PORT || 3000;
