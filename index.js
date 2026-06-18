@@ -273,3 +273,300 @@ app.get('/oauth2callback', async (req, res) => {
         res.send(`❌ Login failed: ${error.message}`);
     }
 });
+// ============ TELEGRAM BOT ============
+const bot = new Telegraf(BOT_TOKEN);
+
+// ============ API KEY MANAGEMENT ============
+let currentKey = 0;
+let keyUsage = [0, 0, 0];
+let keyReset = [Date.now(), Date.now(), Date.now()];
+
+function getApiKey() {
+    const now = Date.now();
+    const ONE_DAY = 86400000;
+    for(let i = 0; i < API_KEYS.length; i++) {
+        if(now - keyReset[i] > ONE_DAY) { keyUsage[i] = 0; keyReset[i] = now; }
+        if(keyUsage[i] < 9000) { currentKey = i; keyUsage[i]++; return API_KEYS[i]; }
+    }
+    return null;
+}
+
+function getYoutube() {
+    const key = getApiKey();
+    if (!key) return null;
+    return google.youtube({ version: 'v3', auth: key });
+}
+
+// ============ CLEANUP FUNCTIONS ============
+
+function clearAllTempFiles() {
+    const files = fs.readdirSync(TEMP_DIR);
+    let deleted = 0;
+    for (const file of files) {
+        const filePath = path.join(TEMP_DIR, file);
+        try { fs.unlinkSync(filePath); deleted++; } catch(e) {}
+    }
+    if (deleted > 0) console.log(`🗑️ Cleared ${deleted} temp files`);
+}
+
+function clearUserTempFiles(userId) {
+    const files = fs.readdirSync(TEMP_DIR);
+    let deleted = 0;
+    for (const file of files) {
+        if (file.startsWith(userId)) {
+            const filePath = path.join(TEMP_DIR, file);
+            try { fs.unlinkSync(filePath); deleted++; } catch(e) {}
+        }
+    }
+    return deleted;
+}
+
+// ============ VERIFY FUNCTIONS ============
+
+async function checkYouTubeSubscriptionWithApi(channelId) {
+    try {
+        const youtube = getYoutube();
+        if (!youtube) return false;
+        const response = await youtube.subscriptions.list({ part: 'snippet', channelId: channelId, forChannelId: REQUIRED_YOUTUBE_CHANNEL_ID });
+        return response.data.items && response.data.items.length > 0;
+    } catch(error) { return false; }
+}
+
+async function checkTelegramMembership(userId) {
+    try {
+        const chatMember = await bot.telegram.getChatMember(REQUIRED_TELEGRAM_CHANNEL, userId);
+        return chatMember.status === 'member' || chatMember.status === 'administrator' || chatMember.status === 'creator';
+    } catch(e) { return false; }
+}
+
+function trackInvite(inviterId, inviteeId) {
+    if (!inviteTracker.has(inviterId)) {
+        inviteTracker.set(inviterId, { invitedBy: null, invitedUsers: [] });
+    }
+    const inviterData = inviteTracker.get(inviterId);
+    if (!inviterData.invitedUsers.includes(inviteeId)) {
+        inviterData.invitedUsers.push(inviteeId);
+        inviteTracker.set(inviterId, inviterData);
+        return true;
+    }
+    return false;
+}
+
+function getRemainingUploads(session) {
+    const totalAllowed = session.totalUploadsAllowed || MAX_UPLOADS;
+    const used = session.uploadCount || 0;
+    return Math.max(0, totalAllowed - used);
+}
+
+function formatNumber(num) {
+    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function parseDuration(duration) {
+    const match = duration.match(/PT(\d+H)?(\d+M)?(\d+S)?/);
+    const hours = (match[1] || '').replace('H', '') || 0;
+    const minutes = (match[2] || '').replace('M', '') || 0;
+    const seconds = (match[3] || '').replace('S', '') || 0;
+    return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+// ============ GREEN APPLE FUNCTIONS ============
+
+function generateGreenAppleLink(userId) {
+    const token = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    const session = userSessions.get(userId);
+    if (session) {
+        session.greenAppleToken = token;
+        session.greenAppleTokenGeneratedAt = Date.now();
+        userSessions.set(userId, session);
+    }
+    greenAppleTokens.set(token, {
+        userId: userId,
+        timestamp: Date.now(),
+        verified: false
+    });
+    const callbackUrl = `https://final-boss-jnl3.onrender.com/api/greenapple/verify?token=${token}&user=${userId}`;
+    const encodedCallback = encodeURIComponent(callbackUrl);
+    return `https://t.me/GreenAppletgBot/play?startapp=${token}&callback=${encodedCallback}`;
+}
+
+async function showGreenAppleVerification(ctx, userId) {
+    const verifyLink = generateGreenAppleLink(userId);
+    await ctx.reply(
+        `🍏 *Sponsor Verification Required*\n\n` +
+        `To use this bot, please support our sponsor:\n\n` +
+        `1️⃣ Click the button below to open Green Apple\n` +
+        `2️⃣ Wait for the app to load\n` +
+        `3️⃣ You'll be automatically verified\n` +
+        `4️⃣ Return to this bot\n\n` +
+        `⚠️ Link expires in 10 minutes.`,
+        Markup.inlineKeyboard([
+            [Markup.button.url('🍏 Open & Verify', verifyLink)],
+            [Markup.button.callback('✅ I\'m Verified', 'green_apple_verified_check')],
+            [Markup.button.callback('❌ Cancel', 'green_apple_cancel')]
+        ]),
+        { parse_mode: 'Markdown', disable_web_page_preview: true }
+    );
+}
+
+async function continueStartFlow(ctx, userId) {
+    const session = userSessions.get(userId);
+    const isTelegramMember = await checkTelegramMembership(ctx.from.id);
+    if (!isTelegramMember) {
+        return ctx.reply(
+            `❌ *Join ${REQUIRED_TELEGRAM_CHANNEL} first!*`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('📢 Join', `https://t.me/${REQUIRED_TELEGRAM_CHANNEL.replace('@', '')}`)],
+                [Markup.button.callback('✅ Verify', 'verify_telegram')]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+    }
+    session.telegramVerified = true;
+    userSessions.set(userId, session);
+    if (session.mainAccount && session.mainAccount.authenticated) {
+        await showMainMenu(ctx, userId);
+        return;
+    }
+    const authUrl = `${REDIRECT_URI.replace('/oauth2callback', '/auth')}?userId=${userId}`;
+    await ctx.reply(
+        `✅ Sponsor Verified!\n\nNow login with YouTube to start uploading.`,
+        Markup.inlineKeyboard([[Markup.button.url('🔑 Login with YouTube', authUrl)]])
+    );
+}
+
+// ============ MENUS ============
+
+const mainMenu = Markup.inlineKeyboard([
+    [Markup.button.callback('💬 Chat with AI', 'chat_ai')],
+    [Markup.button.callback('📝 Summarize', 'summarize')],
+    [Markup.button.callback('💡 Get Advice', 'advice')],
+    [Markup.button.callback('🤖 AI Tools', 'ai_menu')],
+    [Markup.button.callback('📤 Upload Video', 'upload')],
+    [Markup.button.callback('🔍 Analyze Video', 'analyze_video')],
+    [Markup.button.callback('📊 Analyze Channel', 'analyze_channel')],
+    [Markup.button.callback('📊 Status', 'status')],
+    [Markup.button.callback('👥 Invite', 'invite')],
+    [Markup.button.callback('✅ Verify Subscription', 'verify_subscription')],
+    [Markup.button.callback('🍏 Sponsor', 'green_apple_sponsor')],
+    [Markup.button.callback('🆘 Contact', 'contact_developer')],
+    [Markup.button.callback('🚪 Logout', 'logout')]
+]);
+
+const aiMenu = Markup.inlineKeyboard([
+    [Markup.button.callback('🎯 AI Titles', 'ai_title')],
+    [Markup.button.callback('📝 AI Description', 'ai_desc')],
+    [Markup.button.callback('🏷️ AI Tags', 'ai_tags')],
+    [Markup.button.callback('🔙 Back', 'back_to_menu')]
+]);
+
+// ============ BOT START ============
+
+bot.start(async (ctx) => {
+    const userId = ctx.from.id.toString();
+    let session = userSessions.get(userId);
+    if (!session) {
+        session = {
+            mainAccount: null, subscriptionVerified: false, uploadCount: 0,
+            totalUploadsAllowed: MAX_UPLOADS, linkedAccounts: [], telegramVerified: false,
+            aiMode: null, analysisMode: null, chatMode: null,
+            greenAppleVerified: false, greenAppleToken: null, greenAppleTokenGeneratedAt: null
+        };
+        userSessions.set(userId, session);
+    }
+    const text = ctx.message.text || '';
+    const refMatch = text.match(/\/start\s+greenapple_(\w+)/);
+    if (refMatch) {
+        const token = refMatch[1];
+        const tokenData = greenAppleTokens.get(token);
+        if (tokenData && !tokenData.verified) {
+            tokenData.verified = true;
+            greenAppleTokens.set(token, tokenData);
+            session.greenAppleVerified = true;
+            session.greenAppleVerifiedAt = new Date();
+            userSessions.set(userId, session);
+            await ctx.reply(`✅ *Green Apple Verified!*\n\nThank you for supporting our sponsor! 🎉\n\nContinuing...`, { parse_mode: 'Markdown' });
+            await continueStartFlow(ctx, userId);
+            return;
+        } else {
+            await ctx.reply(`❌ *Invalid or Expired Token*\n\nPlease request a new verification link.`, { parse_mode: 'Markdown' });
+            await showGreenAppleVerification(ctx, userId);
+            return;
+        }
+    }
+    if (session.greenAppleVerified) {
+        await continueStartFlow(ctx, userId);
+        return;
+    }
+    if (session.greenAppleToken) {
+        const tokenData = greenAppleTokens.get(session.greenAppleToken);
+        if (tokenData && !tokenData.verified) {
+            if (Date.now() - tokenData.timestamp < 600000) {
+                await ctx.reply(
+                    `⏳ *Verification Pending*\n\nPlease open Green Apple using the link below.\n\n⏰ Link expires in ${Math.round((600000 - (Date.now() - tokenData.timestamp)) / 60000)} minutes.`,
+                    Markup.inlineKeyboard([
+                        [Markup.button.url('🍏 Open & Verify', generateGreenAppleLink(userId))],
+                        [Markup.button.callback('🔄 Check Again', 'green_apple_verified_check')],
+                        [Markup.button.callback('❌ Cancel', 'green_apple_cancel')]
+                    ]),
+                    { parse_mode: 'Markdown' }
+                );
+                return;
+            } else {
+                greenAppleTokens.delete(session.greenAppleToken);
+                session.greenAppleToken = null;
+                session.greenAppleTokenGeneratedAt = null;
+                userSessions.set(userId, session);
+            }
+        }
+    }
+    await showGreenAppleVerification(ctx, userId);
+});
+
+// ============ GREEN APPLE BUTTON HANDLERS ============
+
+bot.action('green_apple_verified_check', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (session && session.greenAppleVerified) {
+        await ctx.editMessageText(`✅ *Verification Confirmed!*\n\nContinuing...`, { parse_mode: 'Markdown' });
+        await continueStartFlow(ctx, userId);
+    } else {
+        await ctx.editMessageText(
+            `⏳ *Not Verified Yet*\n\nPlease open Green Apple using the link below.`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('🍏 Open & Verify', generateGreenAppleLink(userId))],
+                [Markup.button.callback('🔄 Check Again', 'green_apple_verified_check')],
+                [Markup.button.callback('❌ Cancel', 'green_apple_cancel')]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+    }
+    await ctx.answerCbQuery();
+});
+
+bot.action('green_apple_cancel', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (session) {
+        if (session.greenAppleToken) {
+            greenAppleTokens.delete(session.greenAppleToken);
+            session.greenAppleToken = null;
+            session.greenAppleTokenGeneratedAt = null;
+        }
+        userSessions.set(userId, session);
+    }
+    await ctx.editMessageText(`❌ *Verification Cancelled*\n\nYou can try again anytime by sending /start.`, { parse_mode: 'Markdown' });
+    await ctx.answerCbQuery('Cancelled');
+});
+
+bot.action('green_apple_sponsor', async (ctx) => {
+    await ctx.reply(
+        `🍏 *${SPONSOR_NAME}*\n\nSupport our sponsor by trying Green Apple!\n\nClick below to open.`,
+        Markup.inlineKeyboard([
+            [Markup.button.url('🍏 Open Green Apple', SPONSOR_LINK)],
+            [Markup.button.callback('🔙 Back', 'back_to_menu')]
+        ]),
+        { parse_mode: 'Markdown' }
+    );
+});
