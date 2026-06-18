@@ -316,3 +316,293 @@ app.get('/oauth2callback', async (req, res) => {
         res.send(`❌ Login failed: ${error.message}`);
     }
 });
+// ============ TELEGRAM BOT ============
+const bot = new Telegraf(BOT_TOKEN);
+
+// ============ API KEY MANAGEMENT ============
+let currentKey = 0;
+let keyUsage = [0, 0, 0];
+let keyReset = [Date.now(), Date.now(), Date.now()];
+
+function getApiKey() {
+    const now = Date.now();
+    const ONE_DAY = 86400000;
+    for(let i = 0; i < API_KEYS.length; i++) {
+        if(now - keyReset[i] > ONE_DAY) { keyUsage[i] = 0; keyReset[i] = now; }
+        if(keyUsage[i] < 9000) { currentKey = i; keyUsage[i]++; return API_KEYS[i]; }
+    }
+    return null;
+}
+
+function getYoutube() {
+    const key = getApiKey();
+    if (!key) return null;
+    return google.youtube({ version: 'v3', auth: key });
+}
+
+// ============ CLEANUP FUNCTIONS ============
+
+function clearAllTempFiles() {
+    const files = fs.readdirSync(TEMP_DIR);
+    let deleted = 0;
+    for (const file of files) {
+        const filePath = path.join(TEMP_DIR, file);
+        try { fs.unlinkSync(filePath); deleted++; } catch(e) {}
+    }
+    if (deleted > 0) console.log(`🗑️ Cleared ${deleted} temp files`);
+}
+
+function clearUserTempFiles(userId) {
+    const files = fs.readdirSync(TEMP_DIR);
+    let deleted = 0;
+    for (const file of files) {
+        if (file.startsWith(userId)) {
+            const filePath = path.join(TEMP_DIR, file);
+            try { fs.unlinkSync(filePath); deleted++; } catch(e) {}
+        }
+    }
+    return deleted;
+}
+
+// ============ VERIFY FUNCTIONS ============
+
+async function checkYouTubeSubscriptionWithApi(channelId) {
+    try {
+        const youtube = getYoutube();
+        if (!youtube) return false;
+        const response = await youtube.subscriptions.list({ part: 'snippet', channelId: channelId, forChannelId: REQUIRED_YOUTUBE_CHANNEL_ID });
+        return response.data.items && response.data.items.length > 0;
+    } catch(error) { return false; }
+}
+
+async function checkTelegramMembership(userId) {
+    try {
+        const chatMember = await bot.telegram.getChatMember(REQUIRED_TELEGRAM_CHANNEL, userId);
+        return chatMember.status === 'member' || chatMember.status === 'administrator' || chatMember.status === 'creator';
+    } catch(e) { return false; }
+}
+
+async function checkSponsorMembership(userId) {
+    try {
+        const chatMember = await bot.telegram.getChatMember(SPONSOR_CHANNEL, userId);
+        return chatMember.status === 'member' || chatMember.status === 'administrator' || chatMember.status === 'creator';
+    } catch(e) { return false; }
+}
+
+function trackInvite(inviterId, inviteeId) {
+    if (!inviteTracker.has(inviterId)) {
+        inviteTracker.set(inviterId, { invitedBy: null, invitedUsers: [] });
+    }
+    const inviterData = inviteTracker.get(inviterId);
+    if (!inviterData.invitedUsers.includes(inviteeId)) {
+        inviterData.invitedUsers.push(inviteeId);
+        inviteTracker.set(inviterId, inviterData);
+        return true;
+    }
+    return false;
+}
+
+function getRemainingUploads(session) {
+    const totalAllowed = session.totalUploadsAllowed || MAX_UPLOADS;
+    const used = session.uploadCount || 0;
+    return Math.max(0, totalAllowed - used);
+}
+
+function formatNumber(num) {
+    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function parseDuration(duration) {
+    const match = duration.match(/PT(\d+H)?(\d+M)?(\d+S)?/);
+    const hours = (match[1] || '').replace('H', '') || 0;
+    const minutes = (match[2] || '').replace('M', '') || 0;
+    const seconds = (match[3] || '').replace('S', '') || 0;
+    return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+// ============ MENUS ============
+
+const mainMenu = Markup.inlineKeyboard([
+    [Markup.button.callback('💬 Chat with AI', 'chat_ai')],
+    [Markup.button.callback('📝 Summarize', 'summarize')],
+    [Markup.button.callback('💡 Get Advice', 'advice')],
+    [Markup.button.callback('🤖 AI Tools', 'ai_menu')],
+    [Markup.button.callback('📤 Upload Video', 'upload')],
+    [Markup.button.callback('🔍 Analyze Video', 'analyze_video')],
+    [Markup.button.callback('📊 Analyze Channel', 'analyze_channel')],
+    [Markup.button.callback('📊 Status', 'status')],
+    [Markup.button.callback('👥 Invite', 'invite')],
+    [Markup.button.callback('✅ Verify', 'verify_subscription')],
+    [Markup.button.callback('🆘 Contact', 'contact_developer')],
+    [Markup.button.callback('🚪 Logout', 'logout')]
+]);
+
+const aiMenu = Markup.inlineKeyboard([
+    [Markup.button.callback('🎯 AI Titles', 'ai_title')],
+    [Markup.button.callback('📝 AI Description', 'ai_desc')],
+    [Markup.button.callback('🏷️ AI Tags', 'ai_tags')],
+    [Markup.button.callback('🔙 Back', 'back_to_menu')]
+]);
+
+// ============ BOT COMMANDS ============
+
+bot.start(async (ctx) => {
+    const userId = ctx.from.id.toString();
+    if (!userSessions.has(userId)) {
+        userSessions.set(userId, {
+            mainAccount: null, subscriptionVerified: false, uploadCount: 0,
+            totalUploadsAllowed: MAX_UPLOADS, linkedAccounts: [], telegramVerified: false,
+            aiMode: null, analysisMode: null, chatMode: null, sponsorVerified: false
+        });
+    }
+    const session = userSessions.get(userId);
+    
+    // Check if user joined sponsor channel
+    const isSponsorMember = await checkSponsorMembership(ctx.from.id);
+    if (!isSponsorMember) {
+        return ctx.reply(
+            `❌ *Please Join Our Sponsor Channel First!*\n\n` +
+            `To use this bot, you must join:\n` +
+            `📢 ${SPONSOR_CHANNEL}\n\n` +
+            `After joining, send /start again to verify.`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('📢 Join Sponsor Channel', SPONSOR_LINK)],
+                [Markup.button.url('🔄 Verify', 'https://t.me/share/url?url=https://t.me/${ctx.botInfo.username}&text=I joined the sponsor channel!')]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+    }
+    session.sponsorVerified = true;
+    
+    const isTelegramMember = await checkTelegramMembership(ctx.from.id);
+    if (!isTelegramMember) {
+        return ctx.reply(
+            `❌ *Join ${REQUIRED_TELEGRAM_CHANNEL} first!*`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('📢 Join', `https://t.me/${REQUIRED_TELEGRAM_CHANNEL.replace('@', '')}`)],
+                [Markup.button.callback('✅ Verify', 'verify_telegram')]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+    }
+    session.telegramVerified = true;
+    userSessions.set(userId, session);
+    
+    if (session.mainAccount && session.mainAccount.authenticated) {
+        await showMainMenu(ctx, userId);
+        return;
+    }
+    const authUrl = `${REDIRECT_URI.replace('/oauth2callback', '/auth')}?userId=${userId}`;
+    await ctx.reply(
+        `✅ Verified!\n\nLogin with YouTube:`,
+        Markup.inlineKeyboard([[Markup.button.url('🔑 Login with YouTube', authUrl)]])
+    );
+});
+
+// ============ SHOW MAIN MENU ============
+
+async function showMainMenu(ctx, userId) {
+    const session = userSessions.get(userId);
+    if (!session || !session.mainAccount || !session.mainAccount.authenticated) {
+        return ctx.reply('❌ Please login first.');
+    }
+    const remaining = getRemainingUploads(session);
+    const inviteCount = inviteTracker.has(userId) ? inviteTracker.get(userId).invitedUsers.length : 0;
+    
+    let msg = `👋 *${session.mainAccount?.channelName || 'User'}*\n\n`;
+    msg += `📤 Uploads: ${session.uploadCount || 0}/${session.totalUploadsAllowed}\n`;
+    msg += `📊 Remaining: ${remaining}\n👥 Invites: ${inviteCount}\n`;
+    msg += `📦 Max file: ${MAX_FILE_SIZE_MB}MB\n🤖 AI: ✅ Ready\n\n💬 *Chat, Summarize, Get Advice!*`;
+    
+    try {
+        await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...mainMenu });
+    } catch(e) {
+        await ctx.reply(msg, { parse_mode: 'Markdown', ...mainMenu });
+    }
+}
+
+// ============ AI ACTIONS ============
+
+bot.action('chat_ai', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session || !session.mainAccount) return ctx.reply('❌ Login first.');
+    session.chatMode = 'chat';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(`💬 *Chat with AI*\n\nAsk anything!\nType /cancel to exit.`, { parse_mode: 'Markdown' });
+});
+
+bot.action('summarize', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session || !session.mainAccount) return ctx.reply('❌ Login first.');
+    session.chatMode = 'summarize';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(`📝 *Summarize*\n\nSend text to summarize.\nType /cancel to exit.`, { parse_mode: 'Markdown' });
+});
+
+bot.action('advice', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session || !session.mainAccount) return ctx.reply('❌ Login first.');
+    session.chatMode = 'advice';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(`💡 *Get Advice*\n\nWhat do you need advice on?\nType /cancel to exit.`, { parse_mode: 'Markdown' });
+});
+
+bot.action('ai_menu', async (ctx) => {
+    await ctx.editMessageText(`🤖 *AI Tools*\n\n🎯 Titles | 📝 Descriptions | 🏷️ Tags`, { parse_mode: 'Markdown', ...aiMenu });
+});
+
+bot.action('ai_title', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    session.aiMode = 'title';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(`🎯 Send me a topic.\nType /cancel to exit.`);
+});
+
+bot.action('ai_desc', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    session.aiMode = 'description';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(`📝 Send: Title | Topic | Keywords\nType /cancel to exit.`);
+});
+
+bot.action('ai_tags', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    session.aiMode = 'tags';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(`🏷️ Send me a topic.\nType /cancel to exit.`);
+});
+
+// ============ OTHER ACTIONS ============
+
+bot.action('contact_developer', async (ctx) => {
+    await ctx.editMessageText(
+        `🆘 *Contact Developer*\n\n👨‍💻 ${DEVELOPER_CONTACT}`,
+        Markup.inlineKeyboard([
+            [Markup.button.url('📩 Contact', `https://t.me/${DEVELOPER_CONTACT.replace('@', '')}`)],
+            [Markup.button.callback('🔙 Back', 'back_to_menu')]
+        ]),
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.action('verify_telegram', async (ctx) => {
+    const isMember = await checkTelegramMembership(ctx.from.id);
+    const userId = ctx.from.id.toString();
+    if (isMember) {
+        const session = userSessions.get(userId);
+        if (session) session.telegramVerified = true;
+        await ctx.editMessageText(
+            `✅ Verified! Login with YouTube.`,
+            Markup.inlineKeyboard([[Markup.button.url('🔑 Login', `${REDIRECT_URI.replace('/oauth2callback', '/auth')}?userId=${userId}`)]])
+        );
+        await ctx.answerCbQuery('Verified!');
+    } else {
+        await ctx.answerCbQuery('❌ Not a member!', { show_alert: true });
+    }
+});
