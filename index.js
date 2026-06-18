@@ -8,24 +8,24 @@
 ‎const cors = require('cors');
 ‎const { HfInference } = require('@huggingface/inference');
 ‎
-‎// ============ CREDENTIALS ============
+‎
 ‎const BOT_TOKEN = process.env.BOT_TOKEN;
 ‎const CLIENT_ID = '39782137338-leo8rmrpic812o2klvsrmgk84o10d4j4.apps.googleusercontent.com';
 ‎const CLIENT_SECRET = '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';
 ‎const REDIRECT_URI = 'https://final-boss-jnl3.onrender.com/oauth2callback';
 ‎
-‎// ============ HF TOKEN ============
+‎
 ‎const HF_TOKEN = process.env.HF_TOKEN || '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';
 ‎const hf = new HfInference(HF_TOKEN);
 ‎
-‎// ============ API KEYS ============
+‎
 ‎const API_KEYS = [
 ‎    'AIzaSyABemoPCHktvGsGZ1R99PrbA7FTQWuTDZg',
 ‎    'AIzaSyAXzQXd0AONNgSI8E6D5_BeweMqyz4iGTg',
 ‎    'AIzaSyDjLVpU8M9VFBAuj-_pvSyDW1BbUfCjyIY'
 ‎];
 ‎
-‎// ============ CHANNEL REQUIREMENTS ============
+‎
 ‎const REQUIRED_TELEGRAM_CHANNEL = '@bot_Farming';
 ‎const REQUIRED_YOUTUBE_CHANNEL_ID = 'UCdXmlIXXiPuI8jEis3Ht5KQ';
 ‎const REQUIRED_YOUTUBE_CHANNEL_NAME = '@Noah_Technical';
@@ -35,18 +35,18 @@
 ‎const DEVELOPER_CONTACT = '@Ace_spy';
 ‎const MAX_FILE_SIZE_MB = 300;
 ‎
-‎// ============ SPONSOR CONFIG ============
-‎// Green Apple is the sponsor
+‎
+‎
 ‎const SPONSOR_NAME = 'Green Apple';
 ‎const SPONSOR_LINK = 'https://t.me/GreenAppletgBot/play?startapp=6596414316';
 ‎const SPONSORS = [];
 ‎const BROADCAST_HISTORY = [];
 ‎
-‎// ============ GREEN APPLE TOKENS ============
+‎
 ‎const GREEN_APPLE_TOKENS = new Map();
 ‎const YOUR_BOT_USERNAME = process.env.BOT_USERNAME || 'final_boss_bot';
 ‎
-‎// ============ EXPRESS SETUP ============
+‎
 ‎const PORT = process.env.PORT || 3000;
 ‎const app = express();
 ‎
@@ -60,7 +60,7 @@
 ‎app.use(express.json());
 ‎app.use(express.urlencoded({ extended: true }));
 ‎
-‎// ============ OAuth Setup ============
+‎
 ‎const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 ‎const userSessions = new Map();
 ‎const inviteTracker = new Map();
@@ -70,12 +70,12 @@
 ‎const TEMP_DIR = '/tmp/youtube_uploads';
 ‎if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 ‎
-‎// ============ AI READY ============
+‎
 ‎let aiReady = true;
 ‎let loadingProgress = 100;
 ‎let loadingMessage = '✅ Ready (API)';
 ‎
-‎// ============ AI FUNCTIONS ============
+‎
 ‎
 ‎async function chatWithAI(userMessage) {
 ‎    try {
@@ -165,7 +165,7 @@
 ‎    }
 ‎}
 ‎
-‎// ============ EXPRESS ROUTES ============
+‎
 ‎
 ‎app.get('/', (req, res) => {
 ‎    res.send(`
@@ -205,7 +205,7 @@
 ‎    });
 ‎});
 ‎
-‎// ============ AUTH ROUTES ============
+‎
 ‎
 ‎app.get('/auth', (req, res) => {
 ‎    const userId = req.query.userId || req.session.userId || 'default';
@@ -273,10 +273,10 @@
 ‎    }
 ‎});
 ‎
-‎// ============ TELEGRAM BOT ============
+‎
 ‎const bot = new Telegraf(BOT_TOKEN);
 ‎
-‎// ============ API KEY MANAGEMENT ============
+‎
 ‎let currentKey = 0;
 ‎let keyUsage = [0, 0, 0];
 ‎let keyReset = [Date.now(), Date.now(), Date.now()];
@@ -297,7 +297,7 @@
 ‎    return google.youtube({ version: 'v3', auth: key });
 ‎}
 ‎
-‎// ============ CLEANUP FUNCTIONS ============
+‎
 ‎
 ‎function clearAllTempFiles() {
 ‎    const files = fs.readdirSync(TEMP_DIR);
@@ -321,7 +321,7 @@
 ‎    return deleted;
 ‎}
 ‎
-‎// ============ VERIFY FUNCTIONS ============
+‎
 ‎
 ‎async function checkYouTubeSubscriptionWithApi(channelId) {
 ‎    try {
@@ -370,7 +370,7 @@
 ‎    return `${hours}h ${minutes}m ${seconds}s`;
 ‎}
 ‎
-‎// ============ SPONSOR CLASS ============
+‎
 ‎
 ‎class Sponsor {
 ‎    constructor(name, link, logo, description, tier, price) {
@@ -386,7 +386,7 @@
 ‎    }
 ‎}
 ‎
-‎// ============ GREEN APPLE FUNCTIONS ============
+‎
 ‎
 ‎function generateGreenAppleLink(userId) {
 ‎    const token = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
@@ -451,7 +451,7 @@
 ‎    );
 ‎}
 ‎
-‎// ============ MENUS ============
+‎
 ‎
 ‎const mainMenu = Markup.inlineKeyboard([
 ‎    [Markup.button.callback('💬 Chat with AI', 'chat_ai')],
@@ -476,7 +476,7 @@
 ‎    [Markup.button.callback('🔙 Back', 'back_to_menu')]
 ‎]);
 ‎
-‎// ============ BOT START ============
+‎
 ‎
 ‎bot.start(async (ctx) => {
 ‎    const userId = ctx.from.id.toString();
@@ -538,7 +538,7 @@
 ‎    }
 ‎    await showGreenAppleVerification(ctx, userId);
 ‎});
-‎‎// ============ BOT ACTIONS ============
+‎‎
 ‎
 ‎bot.action('green_apple_verified_check', async (ctx) => {
 ‎    const userId = ctx.from.id.toString();
@@ -787,7 +787,7 @@
 ‎    await ctx.editMessageText(`📊 Send me a YouTube channel link or ID.\nType /cancel to exit.`);
 ‎});
 ‎
-‎// ============ TEXT HANDLERS ============
+‎
 ‎
 ‎bot.on('text', async (ctx) => {
 ‎    const userId = ctx.from.id.toString();
@@ -808,7 +808,7 @@
 ‎    else if (session.analysisMode === 'channel') await handleChannelAnalysis(ctx, text);
 ‎});
 ‎
-‎// ============ HANDLERS ============
+‎
 ‎
 ‎async function handleChat(ctx, text) {
 ‎    const userId = ctx.from.id.toString();
@@ -974,7 +974,7 @@
 ‎    }
 ‎}
 ‎
-‎// ============ VIDEO UPLOAD ============
+‎
 ‎
 ‎bot.on('video', async (ctx) => {
 ‎    const userId = ctx.from.id.toString();
@@ -1037,7 +1037,7 @@
 ‎    }
 ‎});
 ‎
-‎// ============ UPLOAD HANDLERS ============
+‎
 ‎
 ‎bot.action('upload_public', async (ctx) => await handleUpload(ctx, 'public'));
 ‎bot.action('upload_private', async (ctx) => await handleUpload(ctx, 'private'));
@@ -1096,7 +1096,7 @@
 ‎    }
 ‎}
 ‎
-‎// ============ HANDLE REFERRALS ============
+‎
 ‎
 ‎bot.start(async (ctx) => {
 ‎    const userId = ctx.from.id.toString();
@@ -1116,7 +1116,7 @@
 ‎        }
 ‎    }
 ‎    
-‎    // Continue with normal start flow
+‎    
 ‎    const isTelegramMember = await checkTelegramMembership(ctx.from.id);
 ‎    if (!isTelegramMember) {
 ‎        return ctx.reply(
@@ -1154,7 +1154,7 @@
 ‎    }
 ‎});
 ‎
-‎// ============ SPONSOR PAGES ============
+‎
 ‎
 ‎app.get('/sponsor', (req, res) => {
 ‎    let html = `
@@ -1297,7 +1297,7 @@
 ‎    `);
 ‎});
 ‎
-‎// ============ API ROUTES ============
+‎
 ‎
 ‎app.get('/api/sponsors', (req, res) => {
 ‎    res.json(SPONSORS.filter(s => s.active));
@@ -1357,7 +1357,7 @@
 ‎    } catch(error) { console.error('Broadcast error:', error); }
 ‎});
 ‎
-‎// ============ GREEN APPLE VERIFICATION API ============
+‎
 ‎
 ‎app.get('/api/greenapple/verify', (req, res) => {
 ‎    const { token, user } = req.query;
@@ -1397,7 +1397,7 @@
 ‎    `);
 ‎});
 ‎
-‎// ============ START SERVER ============
+‎
 ‎
 ‎console.log('🚀 Starting YouTube Bot...');
 ‎console.log('✅ AI Ready (HuggingFace API)');
