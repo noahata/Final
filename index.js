@@ -36,7 +36,7 @@ const DEVELOPER_CONTACT = '@Ace_spy';
 const MAX_FILE_SIZE_MB = 300;
 
 // ============ SPONSOR CONFIG ============
-const SPONSOR_CHANNEL = '@Noah_Technical';
+const SPONSOR_CHANNEL = 'Green Apple App';
 const SPONSOR_LINK = 'https://t.me/Noah_Technical';
 
 // ============ EXPRESS SETUP ============
