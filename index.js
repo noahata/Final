@@ -36,8 +36,27 @@ const DEVELOPER_CONTACT = '@Ace_spy';
 const MAX_FILE_SIZE_MB = 300;
 
 // ============ SPONSOR CONFIG ============
-const SPONSOR_CHANNEL = 'Green Apple App';
+const SPONSOR_CHANNEL = '@GreenAppletgBot';
 const SPONSOR_LINK = 'https://t.me/GreenAppletgBot/play?startapp=6596414316';
+const SPONSORS = [];
+const BROADCAST_HISTORY = [];
+
+// Add Green Apple as default sponsor
+SPONSORS.push(new Sponsor(
+    'Green Apple 🍏',
+    'https://t.me/GreenAppletgBot/play?startapp=6596414316',
+    'https://via.placeholder.com/100x100/4CAF50/FFFFFF?text=🍏',
+    'Support our sponsor by trying Green Apple!',
+    'Premium',
+    0
+));
+
+// ============ SPONSOR VERIFICATION ============
+
+async function checkSponsorMembership(userId) {
+    const session = userSessions.get(userId);
+    return session?.greenAppleVerified || false;
+}
 
 // ============ EXPRESS SETUP ============
 const PORT = process.env.PORT || 3000;
