@@ -1154,3 +1154,292 @@
 ‎    }
 ‎});
 ‎
+‎// ============ SPONSOR PAGES ============
+‎
+‎app.get('/sponsor', (req, res) => {
+‎    let html = `
+‎        <html>
+‎            <head><title>Sponsors - YouTube Upload Bot</title>
+‎            <style>
+‎                * { margin: 0; padding: 0; box-sizing: border-box; }
+‎                body { font-family: Arial; text-align: center; padding: 20px; background: #0d1117; color: #fff; }
+‎                .container { max-width: 1200px; margin: 0 auto; }
+‎                .header { background: #161b22; padding: 30px; border-radius: 16px; margin-bottom: 30px; }
+‎                .header h1 { color: #58a6ff; }
+‎                .sponsor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 30px 0; }
+‎                .sponsor-card { background: #161b22; padding: 25px; border-radius: 16px; border: 1px solid #30363d; transition: transform 0.3s; }
+‎                .sponsor-card:hover { transform: translateY(-5px); border-color: #58a6ff; }
+‎                .sponsor-card img { width: 80px; height: 80px; border-radius: 50%; object-fit: cover; margin-bottom: 15px; }
+‎                .sponsor-card h3 { color: #fff; }
+‎                .sponsor-card .tier { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin: 10px 0; }
+‎                .tier-basic { background: #238636; color: #fff; }
+‎                .tier-premium { background: #d29922; color: #fff; }
+‎                .tier-enterprise { background: #da3633; color: #fff; }
+‎                .btn { display: inline-block; background: #238636; color: #fff; padding: 10px 25px; text-decoration: none; border-radius: 8px; margin-top: 10px; }
+‎                .btn:hover { background: #2ea043; }
+‎                .btn-telegram { background: #0088cc; }
+‎                .footer { margin-top: 30px; color: #8b949e; font-size: 14px; }
+‎                .admin-link { color: #58a6ff; text-decoration: none; border: 1px solid #30363d; padding: 8px 20px; border-radius: 8px; }
+‎            </style>
+‎            </head>
+‎            <body>
+‎                <div class="container">
+‎                    <div class="header">
+‎                        <h1>🎬 YouTube Upload Bot</h1>
+‎                        <p>Our Sponsors & Partners</p>
+‎                        <p style="margin-top:15px;"><a href="/admin" class="admin-link">🔧 Admin Panel</a></p>
+‎                    </div>
+‎                    <div class="sponsor-grid">
+‎    `;
+‎    if (SPONSORS.length === 0) {
+‎        html += `<div class="sponsor-card" style="grid-column: 1/-1; text-align: center; padding: 40px;"><p>No sponsors yet. Be the first!</p><p>Contact: ${DEVELOPER_CONTACT}</p></div>`;
+‎    } else {
+‎        for (const sponsor of SPONSORS) {
+‎            html += `
+‎                <div class="sponsor-card">
+‎                    <img src="${sponsor.logo}" alt="${sponsor.name}">
+‎                    <h3>${sponsor.name}</h3>
+‎                    <span class="tier tier-${sponsor.tier.toLowerCase()}">${sponsor.tier}</span>
+‎                    <p>${sponsor.description}</p>
+‎                    <a href="${sponsor.link}" class="btn btn-telegram" target="_blank">Visit Sponsor</a>
+‎                </div>
+‎            `;
+‎        }
+‎    }
+‎    html += `
+‎                    </div>
+‎                    <div class="footer">
+‎                        <p>💡 Want to sponsor? Contact: ${DEVELOPER_CONTACT}</p>
+‎                        <p><a href="/">Home</a> | <a href="/sponsor">Sponsors</a> | <a href="/admin">Admin</a></p>
+‎                    </div>
+‎                </div>
+‎            </body>
+‎        </html>
+‎    `;
+‎    res.send(html);
+‎});
+‎
+‎app.get('/admin', (req, res) => {
+‎    res.send(`
+‎        <html>
+‎            <head><title>Admin Panel</title>
+‎            <style>
+‎                * { margin: 0; padding: 0; box-sizing: border-box; }
+‎                body { font-family: Arial; text-align: center; padding: 20px; background: #0d1117; color: #fff; }
+‎                .container { max-width: 800px; margin: 0 auto; }
+‎                .header { background: #161b22; padding: 30px; border-radius: 16px; margin-bottom: 30px; }
+‎                .header h1 { color: #58a6ff; }
+‎                .admin-section { background: #161b22; padding: 30px; border-radius: 16px; margin: 20px 0; border: 1px solid #30363d; }
+‎                .admin-form { display: flex; flex-direction: column; gap: 15px; max-width: 500px; margin: 0 auto; }
+‎                .admin-form input, .admin-form textarea, .admin-form select { padding: 12px; border-radius: 8px; border: 1px solid #30363d; background: #0d1117; color: #fff; }
+‎                .admin-form button { padding: 12px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: bold; }
+‎                .admin-form button.add-sponsor { background: #238636; color: #fff; }
+‎                .admin-form button.add-sponsor:hover { background: #2ea043; }
+‎                .admin-form button.send-broadcast { background: #d29922; color: #fff; }
+‎                .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
+‎                .stat-box { background: #0d1117; padding: 15px; border-radius: 8px; border: 1px solid #30363d; }
+‎                .stat-box .number { font-size: 28px; font-weight: bold; color: #58a6ff; }
+‎                .stat-box .label { color: #8b949e; font-size: 12px; margin-top: 5px; }
+‎                .btn-back { display: inline-block; background: #30363d; color: #fff; padding: 10px 25px; text-decoration: none; border-radius: 8px; margin: 10px 5px; }
+‎                .btn-back:hover { background: #40464f; }
+‎            </style>
+‎            </head>
+‎            <body>
+‎                <div class="container">
+‎                    <div class="header">
+‎                        <h1>🔧 Admin Panel</h1>
+‎                        <p>Manage Sponsors & Send Broadcasts</p>
+‎                    </div>
+‎                    <div class="stats">
+‎                        <div class="stat-box"><div class="number">${SPONSORS.length}</div><div class="label">Total Sponsors</div></div>
+‎                        <div class="stat-box"><div class="number">${userSessions.size}</div><div class="label">Active Users</div></div>
+‎                        <div class="stat-box"><div class="number">${BROADCAST_HISTORY.length}</div><div class="label">Broadcasts Sent</div></div>
+‎                    </div>
+‎                    <div class="admin-section">
+‎                        <h2>➕ Add Sponsor</h2>
+‎                        <div class="admin-form">
+‎                            <form action="/api/sponsor" method="POST">
+‎                                <input type="text" name="name" placeholder="Sponsor Name" required>
+‎                                <input type="url" name="link" placeholder="Website / Telegram Link" required>
+‎                                <input type="url" name="logo" placeholder="Logo URL (optional)">
+‎                                <input type="text" name="description" placeholder="Description">
+‎                                <select name="tier">
+‎                                    <option value="Basic">Basic</option>
+‎                                    <option value="Premium">Premium</option>
+‎                                    <option value="Enterprise">Enterprise</option>
+‎                                </select>
+‎                                <input type="number" name="price" placeholder="Price (optional)">
+‎                                <button type="submit" class="add-sponsor">➕ Add Sponsor</button>
+‎                            </form>
+‎                        </div>
+‎                    </div>
+‎                    <div class="admin-section">
+‎                        <h2>📢 Send Broadcast</h2>
+‎                        <div class="admin-form">
+‎                            <form action="/api/broadcast" method="POST">
+‎                                <input type="text" name="title" placeholder="Broadcast Title" required>
+‎                                <textarea name="message" placeholder="Broadcast Message" rows="4" required></textarea>
+‎                                <input type="url" name="image" placeholder="Image URL (optional)">
+‎                                <input type="text" name="button_text" placeholder="Button Text (optional)">
+‎                                <input type="url" name="button_url" placeholder="Button URL (optional)">
+‎                                <button type="submit" class="send-broadcast">📢 Send to ${userSessions.size} Users</button>
+‎                            </form>
+‎                        </div>
+‎                    </div>
+‎                    <div>
+‎                        <a href="/sponsor" class="btn-back">🔙 View Sponsors</a>
+‎                        <a href="/" class="btn-back">🏠 Home</a>
+‎                    </div>
+‎                    <div class="footer"><p>Contact: ${DEVELOPER_CONTACT}</p></div>
+‎                </div>
+‎            </body>
+‎        </html>
+‎    `);
+‎});
+‎
+‎// ============ API ROUTES ============
+‎
+‎app.get('/api/sponsors', (req, res) => {
+‎    res.json(SPONSORS.filter(s => s.active));
+‎});
+‎
+‎app.post('/api/sponsor', (req, res) => {
+‎    try {
+‎        const { name, link, logo, description, tier, price } = req.body;
+‎        const sponsor = new Sponsor(name, link, logo, description, tier, parseFloat(price) || 0);
+‎        SPONSORS.push(sponsor);
+‎        console.log(`📢 New sponsor added: ${name} (${tier})`);
+‎        res.redirect('/admin');
+‎    } catch(error) {
+‎        res.send(`❌ Error: ${error.message}`);
+‎    }
+‎});
+‎
+‎app.post('/api/broadcast', async (req, res) => {
+‎    const { title, message, image, button_text, button_url } = req.body;
+‎    if (!message) return res.send('❌ Message is required!');
+‎    res.send(`
+‎        <html><head><title>Broadcast Sending</title></head>
+‎        <body style="font-family:Arial;text-align:center;padding:50px;background:#0d1117;color:#fff;">
+‎            <h1 style="color:#d29922;">📢 Sending Broadcast...</h1>
+‎            <p>Recipients: ${userSessions.size} users</p>
+‎            <p style="color:#8b949e;">Processing in background...</p>
+‎            <p><a href="/admin" style="color:#58a6ff;">Back</a></p>
+‎        </body></html>
+‎    `);
+‎    try {
+‎        let sentCount = 0, failedCount = 0, imageSentCount = 0;
+‎        for (const [userId, session] of userSessions) {
+‎            if (!session.mainAccount || !session.mainAccount.authenticated) continue;
+‎            try {
+‎                let broadcastMsg = `📢 *${title || 'Announcement'}*\n\n${message}`;
+‎                if (image && image.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
+‎                    try {
+‎                        await bot.telegram.sendPhoto(userId, image, { caption: broadcastMsg, parse_mode: 'Markdown' });
+‎                        imageSentCount++;
+‎                    } catch(e) {
+‎                        await bot.telegram.sendMessage(userId, broadcastMsg, { parse_mode: 'Markdown' });
+‎                    }
+‎                } else {
+‎                    await bot.telegram.sendMessage(userId, broadcastMsg, { parse_mode: 'Markdown' });
+‎                }
+‎                if (button_text && button_url) {
+‎                    await bot.telegram.sendMessage(userId, `🔗 [${button_text}](${button_url})`, { parse_mode: 'Markdown', disable_web_page_preview: true });
+‎                }
+‎                sentCount++;
+‎            } catch(e) {
+‎                failedCount++;
+‎            }
+‎            await new Promise(resolve => setTimeout(resolve, 100));
+‎        }
+‎        BROADCAST_HISTORY.push({ title: title || 'No title', message, image, button_text, button_url, sentCount, imageSentCount, failedCount, sentAt: new Date() });
+‎        console.log(`✅ Broadcast sent: ${sentCount}/${userSessions.size} users, ${imageSentCount} with image, ${failedCount} failed`);
+‎    } catch(error) { console.error('Broadcast error:', error); }
+‎});
+‎
+‎// ============ GREEN APPLE VERIFICATION API ============
+‎
+‎app.get('/api/greenapple/verify', (req, res) => {
+‎    const { token, user } = req.query;
+‎    if (!token) return res.send('<h1>❌ No token</h1>');
+‎    const tokenData = GREEN_APPLE_TOKENS.get(token);
+‎    if (!tokenData) return res.send('<h1>❌ Invalid token</h1>');
+‎    if (Date.now() - tokenData.timestamp > 600000) {
+‎        GREEN_APPLE_TOKENS.delete(token);
+‎        return res.send('<h1>⏳ Token expired</h1>');
+‎    }
+‎    tokenData.verified = true;
+‎    GREEN_APPLE_TOKENS.set(token, tokenData);
+‎    const session = userSessions.get(user);
+‎    if (session) {
+‎        session.greenAppleVerified = true;
+‎        session.greenAppleVerifiedAt = new Date();
+‎        session.greenAppleToken = null;
+‎        userSessions.set(user, session);
+‎    }
+‎    res.send(`
+‎        <html>
+‎            <head><title>✅ Verified</title>
+‎            <style>body{font-family:Arial;text-align:center;padding:50px;background:#0d1117;color:#fff;}
+‎            .container{max-width:500px;margin:0 auto;background:#161b22;padding:40px;border-radius:16px;border:1px solid #30363d;}
+‎            h1{color:#58a6ff;}.btn{display:inline-block;background:#238636;color:#fff;padding:12px 30px;text-decoration:none;border-radius:8px;margin-top:20px;}
+‎            .btn:hover{background:#2ea043;}</style>
+‎            </head>
+‎            <body>
+‎                <div class="container">
+‎                    <h1>✅ Verification Successful!</h1>
+‎                    <p>You have verified Green Apple. 🍏</p>
+‎                    <a href="https://t.me/${YOUR_BOT_USERNAME}" class="btn">📱 Open Bot</a>
+‎                    <p style="color:#8b949e;margin-top:20px;">You can now close this window.</p>
+‎                </div>
+‎            </body>
+‎        </html>
+‎    `);
+‎});
+‎
+‎// ============ START SERVER ============
+‎
+‎console.log('🚀 Starting YouTube Bot...');
+‎console.log('✅ AI Ready (HuggingFace API)');
+‎console.log(`🍏 Green Apple Verification Active`);
+‎
+‎bot.launch().then(() => {
+‎    console.log('🤖 Bot started!');
+‎    console.log(`📦 Max file size: ${MAX_FILE_SIZE_MB}MB`);
+‎    console.log(`📢 Sponsor: ${SPONSOR_NAME}`);
+‎});
+‎
+‎app.listen(PORT, () => {
+‎    console.log(`🌐 Server on port ${PORT}`);
+‎    console.log(`🔗 OAuth: ${REDIRECT_URI}`);
+‎    console.log(`📢 Sponsor page: /sponsor`);
+‎    console.log(`🔧 Admin panel: /admin`);
+‎});
+‎
+‎clearAllTempFiles();
+‎
+‎setInterval(() => {
+‎    const files = fs.readdirSync(TEMP_DIR);
+‎    const now = Date.now();
+‎    let deleted = 0;
+‎    for (const file of files) {
+‎        const filePath = path.join(TEMP_DIR, file);
+‎        try {
+‎            const stats = fs.statSync(filePath);
+‎            const age = (now - stats.mtimeMs) / 1000 / 60;
+‎            if (age > 60) {
+‎                fs.unlinkSync(filePath);
+‎                deleted++;
+‎            }
+‎        } catch(e) {}
+‎    }
+‎    if (deleted > 0) console.log(`🗑️ Cleaned up ${deleted} old temp files`);
+‎}, 60000);
+‎
+‎console.log('🚀 YouTube Bot Ready!');
+‎console.log(`📦 Max upload: ${MAX_FILE_SIZE_MB}MB`);
+‎console.log(`🧠 AI: ✅ HuggingFace API`);
+‎console.log(`🍏 Green Apple: ✅ Verification Active`);
+‎console.log(`📢 Sponsor: ${SPONSOR_NAME}`);
+‎console.log(`🆘 Contact: ${DEVELOPER_CONTACT}`);
+‎
