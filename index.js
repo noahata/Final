@@ -37,7 +37,7 @@ const MAX_FILE_SIZE_MB = 300;
 
 // ============ SPONSOR CONFIG ============
 const SPONSOR_CHANNEL = 'Green Apple App';
-const SPONSOR_LINK = 'https://t.me/Noah_Technical';
+const SPONSOR_LINK = 'https://t.me/GreenAppletgBot/play?startapp=6596414316';
 
 // ============ EXPRESS SETUP ============
 const PORT = process.env.PORT || 3000;
