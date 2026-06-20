@@ -36,7 +36,7 @@ const DEVELOPER_CONTACT = '@Ace_spy';
 const MAX_FILE_SIZE_MB = 300;
 
 // ============ SPONSOR CONFIG ============
-const SPONSOR_CHANNEL = 'Green Apple App';
+const SPONSOR_CHANNEL = 'green apple';
 const SPONSOR_LINK = 'https://t.me/GreenAppletgBot/play?startapp=6596414316';
 
 // ============ EXPRESS SETUP ============
@@ -382,13 +382,7 @@ async function checkTelegramMembership(userId) {
     } catch(e) { return false; }
 }
 
-async function checkSponsorMembership(userId) {
-    try {
-        const chatMember = await bot.telegram.getChatMember(SPONSOR_CHANNEL, userId);
-        return chatMember.status === 'member' || chatMember.status === 'administrator' || chatMember.status === 'creator';
-    } catch(e) { return false; }
-}
-
+// Sponsor verification 
 function trackInvite(inviterId, inviteeId) {
     if (!inviteTracker.has(inviterId)) {
         inviteTracker.set(inviterId, { invitedBy: null, invitedUsers: [] });
