@@ -456,19 +456,14 @@ bot.start(async (ctx) => {
     const session = userSessions.get(userId);
     
     // Check if user joined sponsor channel
-    const isSponsorMember = await checkSponsorMembership(ctx.from.id);
-    if (!isSponsorMember) {
-        return ctx.reply(
-            `❌ *Please Join Our Sponsor Channel First!*\n\n` +
-            `To use this bot, you must join:\n` +
-            `📢 ${SPONSOR_CHANNEL}\n\n` +
-            `After joining, send /start again to verify.`,
-            Markup.inlineKeyboard([
-                [Markup.button.url('📢 Join Sponsor Channel', SPONSOR_LINK)],
-                [Markup.button.url('🔄 Verify', 'https://t.me/share/url?url=https://t.me/${ctx.botInfo.username}&text=I joined the sponsor channel!')]
-            ]),
-            { parse_mode: 'Markdown' }
-        );
+    if (!isSponsorVerified(userId)) {
+  return ctx.reply(
+    `👋 Welcome!\n\nPlease open the Mini App and then click the button below to verify.`,
+    Markup.inlineKeyboard([
+      [Markup.button.url('🎮 Open Mini App', SPONSOR_LINK)],
+      [Markup.button.callback('✅ I’ve opened it!', 'verify_mini_app')]
+    ])
+  );
     }
     session.sponsorVerified = true;
     
