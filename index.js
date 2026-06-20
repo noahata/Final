@@ -570,7 +570,18 @@ bot.action('ai_tags', async (ctx) => {
     userSessions.set(userId, session);
     await ctx.editMessageText(`🏷️ Send me a topic.\nType /cancel to exit.`);
 });
-
+bot.action('verify_mini_app', async (ctx) => {
+  const userId = ctx.from.id.toString();
+  const session = userSessions.get(userId);
+  if (!session) {
+    return ctx.answerCbQuery('Session expired. Please restart with /start.', true);
+  }
+  session.miniAppVerified = true;
+  userSessions.set(userId, session);
+  await ctx.editMessageText('✅ Verification successful! You can now use the bot.');
+  await showMainMenu(ctx, userId);
+  await ctx.answerCbQuery('Verified!');
+});
 // ============ OTHER ACTIONS ============
 
 bot.action('contact_developer', async (ctx) => {
