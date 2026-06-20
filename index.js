@@ -382,7 +382,11 @@ async function checkTelegramMembership(userId) {
     } catch(e) { return false; }
 }
 
-// Sponsor verification 
+
+function isSponsorVerified(userId) {
+  const session = userSessions.get(userId);
+  return session && session.miniAppVerified === true;
+}
 function trackInvite(inviterId, inviteeId) {
     if (!inviteTracker.has(inviterId)) {
         inviteTracker.set(inviterId, { invitedBy: null, invitedUsers: [] });
