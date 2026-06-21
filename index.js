@@ -290,3 +290,222 @@ app.post('/admin/broadcast', async (req, res) => {
         </html>
     `);
 });
+// ============ AI FUNCTIONS WITH FALLBACK & RETRY ============
+const IMAGE_MODELS = [
+    'stabilityai/stable-diffusion-2-1',
+    'runwayml/stable-diffusion-v1-5',
+    'prompthero/openjourney-v4'
+];
+
+const CHAT_MODELS = [
+    'deepseek-ai/DeepSeek-V3',
+    'meta-llama/Llama-3.2-3B-Instruct',
+    'mistralai/Mistral-7B-Instruct-v0.3'
+];
+
+// Helper: call HF with retry on ENOTFOUND
+async function callHuggingFace(url, model, token, data, responseType = 'arraybuffer', timeoutMs = 60000) {
+    const maxRetries = 3;
+    let attempt = 0;
+    while (attempt < maxRetries) {
+        try {
+            console.log(`🌐 Calling: ${url}/${model} (attempt ${attempt+1})`);
+            const response = await axiosInstance({
+                method: 'post',
+                url: `${url}/${model}`,
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                data,
+                responseType,
+                timeout: timeoutMs
+            });
+            return response.data;
+        } catch (error) {
+            if ((error.code === 'ENOTFOUND' || error.code === 'ECONNRESET') && attempt < maxRetries - 1) {
+                console.log(`🔄 DNS/connection error, retrying (${attempt+1}/${maxRetries})...`);
+                await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+                attempt++;
+                continue;
+            }
+            console.log(`❌ Attempt ${attempt+1} failed:`, error.message);
+            if (attempt === 0 && url.includes('api-inference')) {
+                console.log(`🔄 Switching to fallback endpoint...`);
+                return callHuggingFace('https://huggingface.co/api/inference', model, token, data, responseType, timeoutMs);
+            }
+            throw error;
+        }
+    }
+    throw new Error(`Failed after ${maxRetries} attempts`);
+}
+
+async function generateImage(prompt) {
+    const token = getHfToken();
+    if (!token) throw new Error('All tokens rate-limited. Try again in a minute.');
+    let lastError;
+    for (const model of IMAGE_MODELS) {
+        try {
+            console.log(`🎨 Trying image model: ${model}`);
+            const data = await callHuggingFace('https://api-inference.huggingface.co/models', model, token, { inputs: prompt }, 'arraybuffer', 60000);
+            return data;
+        } catch (e) {
+            console.log(`❌ ${model} failed:`, e.message);
+            lastError = e;
+        }
+    }
+    throw new Error(`All image models failed: ${lastError?.message || 'unknown error'}`);
+}
+
+async function chatWithDeepSeek(userId, prompt) {
+    const session = userSessions.get(userId);
+    const history = session?.chatHistory || [];
+    let lastError;
+    for (const model of CHAT_MODELS) {
+        try {
+            console.log(`💬 Trying chat model: ${model}`);
+            const data = await callHuggingFace(
+                'https://api-inference.huggingface.co/models',
+                model,
+                HF_TOKEN,
+                {
+                    inputs: prompt,
+                    parameters: { max_new_tokens: 500, temperature: 0.7, return_full_text: false }
+                },
+                'json',
+                30000
+            );
+            let reply = data?.generated_text || data?.[0]?.generated_text || '';
+            if (reply) {
+                // Update history
+                if (session) {
+                    session.chatHistory = session.chatHistory || [];
+                    session.chatHistory.push({ role: 'user', content: prompt });
+                    session.chatHistory.push({ role: 'assistant', content: reply });
+                    if (session.chatHistory.length > 20) session.chatHistory = session.chatHistory.slice(-20);
+                    userSessions.set(userId, session);
+                }
+                return reply;
+            }
+        } catch (e) {
+            console.log(`❌ ${model} failed:`, e.message);
+            lastError = e;
+        }
+    }
+    return `Sorry, I'm having trouble thinking. Please try again later. (All models failed)`;
+}
+
+// ============ BOT START ============
+bot.start(async (ctx) => {
+    const userId = ctx.from.id.toString();
+    if (!userSessions.has(userId)) {
+        userSessions.set(userId, { mode: null, chatHistory: [] });
+    }
+    const isMember = await checkChannelMembership(ctx.from.id);
+    if (!isMember) {
+        return ctx.reply(
+            `❌ *Join ${REQUIRED_CHANNEL} first!*`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('📢 Join Channel', `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`)],
+                [Markup.button.callback('✅ I\'ve joined', 'verify_channel')]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+    }
+    await ctx.reply(
+        `🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.\n\n📌 You are in the channel.`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+});
+
+bot.action('verify_channel', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const isMember = await checkChannelMembership(ctx.from.id);
+    if (!isMember) {
+        return ctx.answerCbQuery('❌ Not a member yet! Join first.', { show_alert: true });
+    }
+    await ctx.editMessageText(
+        `✅ Verified! You are a member of ${REQUIRED_CHANNEL}.\n\n🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+    await ctx.answerCbQuery('Verified!');
+});
+
+// ============ COMMANDS ============
+bot.command('generate', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session) return ctx.reply('Please send /start first.');
+    const isMember = await checkChannelMembership(ctx.from.id);
+    if (!isMember) return ctx.reply(`❌ Join ${REQUIRED_CHANNEL} first.`);
+    await ctx.reply(
+        `🎨 *Choose what to generate:*`,
+        Markup.inlineKeyboard([
+            [Markup.button.callback('🖼️ Image', 'image')],
+            [Markup.button.callback('💬 Chat', 'chat')],
+            [Markup.button.callback('🔙 Back', 'back_to_menu')]
+        ]),
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.command('cancel', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (session) { session.mode = null; userSessions.set(userId, session); }
+    await ctx.reply('✅ Cancelled. Send /generate to start again.', { ...mainMenu });
+});
+
+// ============ ACTIONS ============
+bot.action('image', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session) return ctx.reply('Send /start first.');
+    session.mode = 'image';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(
+        `🎨 *Describe your image*\n\nSend a detailed prompt.\nType /cancel to stop.`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.action('chat', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session) return ctx.reply('Send /start first.');
+    session.mode = 'chat';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(
+        `💬 *Chat with AI*\n\nSend me your message.\nType /cancel to stop.`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.action('back_to_menu', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (session) { session.mode = null; userSessions.set(userId, session); }
+    await ctx.editMessageText(
+        `🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+});
+
+bot.action('status', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const mode = session?.mode || 'idle';
+    const limits = userDailyLimits.get(userId) || { imageCount: 0, chatCount: 0 };
+    await ctx.editMessageText(
+        `📊 *Status*\n\nMode: ${mode}\nImages today: ${limits.imageCount}/${MAX_IMAGES_PER_DAY}\nChats today: ${limits.chatCount}/${MAX_CHATS_PER_DAY}`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+});
+
+bot.action('contact', async (ctx) => {
+    await ctx.editMessageText(
+        `🆘 *Contact*\n\n👨‍💻 ${DEVELOPER_CONTACT}`,
+        Markup.inlineKeyboard([
+            [Markup.button.url('📩 Contact', `https://t.me/${DEVELOPER_CONTACT.replace('@', '')}`)],
+            [Markup.button.callback('🔙 Back', 'back_to_menu')]
+        ]),
+        { parse_mode: 'Markdown' }
+    );
+});
