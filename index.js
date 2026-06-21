@@ -288,3 +288,193 @@ app.post('/admin/broadcast', async (req, res) => {
         </html>
     `);
 });
+// ============ AI FUNCTIONS ============
+const HF_IMAGE_MODEL = 'stabilityai/stable-diffusion-2-1';
+const HF_VIDEO_MODEL = 'damo-vilab/text-to-video-ms-1.7b';
+
+async function generateImage(prompt) {
+    const token = getHfToken();
+    if (!token) throw new Error('All tokens rate-limited. Try again in a minute.');
+    const response = await axios({
+        method: 'post',
+        url: `https://api-inference.huggingface.co/models/${HF_IMAGE_MODEL}`,
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        data: { inputs: prompt },
+        responseType: 'arraybuffer',
+        timeout: 60000
+    });
+    return response.data;
+}
+
+async function generateVideo(prompt) {
+    const token = getHfToken();
+    if (!token) throw new Error('All tokens rate-limited. Try again in a minute.');
+    const response = await axios({
+        method: 'post',
+        url: `https://api-inference.huggingface.co/models/${HF_VIDEO_MODEL}`,
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        data: { inputs: prompt },
+        responseType: 'arraybuffer',
+        timeout: 300000 // 5 minutes
+    });
+    return response.data;
+}
+
+async function chatWithDeepSeek(userId, prompt) {
+    const session = userSessions.get(userId);
+    const history = session?.chatHistory || [];
+    try {
+        const completion = await hfOpenAI.chat.completions.create({
+            model: 'deepseek-ai/DeepSeek-V4-Flash',
+            messages: [
+                { role: 'system', content: 'You are a helpful AI assistant.' },
+                ...history,
+                { role: 'user', content: prompt }
+            ],
+        });
+        const reply = completion.choices[0].message.content;
+        // Update history
+        if (session) {
+            session.chatHistory = session.chatHistory || [];
+            session.chatHistory.push({ role: 'user', content: prompt });
+            session.chatHistory.push({ role: 'assistant', content: reply });
+            if (session.chatHistory.length > 20) session.chatHistory = session.chatHistory.slice(-20);
+            userSessions.set(userId, session);
+        }
+        return reply;
+    } catch (error) {
+        console.error('DeepSeek error:', error.message);
+        return 'Sorry, I encountered an error. Please try again later.';
+    }
+}
+
+// ============ BOT START ============
+bot.start(async (ctx) => {
+    const userId = ctx.from.id.toString();
+    if (!userSessions.has(userId)) {
+        userSessions.set(userId, { mode: null, chatHistory: [] });
+    }
+    const isMember = await checkChannelMembership(ctx.from.id);
+    if (!isMember) {
+        return ctx.reply(
+            `❌ *Join ${REQUIRED_CHANNEL} first!*`,
+            Markup.inlineKeyboard([
+                [Markup.button.url('📢 Join Channel', `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`)],
+                [Markup.button.callback('✅ I\'ve joined', 'verify_channel')]
+            ]),
+            { parse_mode: 'Markdown' }
+        );
+    }
+    await ctx.reply(
+        `🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.\n\n📌 You are in the channel.`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+});
+
+bot.action('verify_channel', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const isMember = await checkChannelMembership(ctx.from.id);
+    if (!isMember) {
+        return ctx.answerCbQuery('❌ Not a member yet! Join first.', { show_alert: true });
+    }
+    await ctx.editMessageText(
+        `✅ Verified! You are a member of ${REQUIRED_CHANNEL}.\n\n🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+    await ctx.answerCbQuery('Verified!');
+});
+
+// ============ COMMANDS ============
+bot.command('generate', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session) return ctx.reply('Please send /start first.');
+    const isMember = await checkChannelMembership(ctx.from.id);
+    if (!isMember) return ctx.reply(`❌ Join ${REQUIRED_CHANNEL} first.`);
+    await ctx.reply(
+        `🎨 *Choose what to generate:*`,
+        Markup.inlineKeyboard([
+            [Markup.button.callback('🖼️ Image', 'image')],
+            [Markup.button.callback('🎬 Video', 'video')],
+            [Markup.button.callback('💬 Chat', 'chat')],
+            [Markup.button.callback('🔙 Back', 'back_to_menu')]
+        ]),
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.command('cancel', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (session) { session.mode = null; userSessions.set(userId, session); }
+    await ctx.reply('✅ Cancelled. Send /generate to start again.', { ...mainMenu });
+});
+
+// ============ ACTIONS ============
+bot.action('image', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session) return ctx.reply('Send /start first.');
+    session.mode = 'image';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(
+        `🎨 *Describe your image*\n\nSend a detailed prompt.\nType /cancel to stop.`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.action('video', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session) return ctx.reply('Send /start first.');
+    session.mode = 'video';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(
+        `🎬 *Describe your video*\n\nSend a detailed prompt (may take 2-5 minutes).\nType /cancel to stop.`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.action('chat', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!session) return ctx.reply('Send /start first.');
+    session.mode = 'chat';
+    userSessions.set(userId, session);
+    await ctx.editMessageText(
+        `💬 *Chat with AI*\n\nSend me your message.\nType /cancel to stop.`,
+        { parse_mode: 'Markdown' }
+    );
+});
+
+bot.action('back_to_menu', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (session) { session.mode = null; userSessions.set(userId, session); }
+    await ctx.editMessageText(
+        `🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+});
+
+bot.action('status', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    const mode = session?.mode || 'idle';
+    const limits = userDailyLimits.get(userId) || { imageCount: 0, videoCount: 0, chatCount: 0 };
+    await ctx.editMessageText(
+        `📊 *Status*\n\nMode: ${mode}\nImages today: ${limits.imageCount}/${MAX_IMAGES_PER_DAY}\nVideos today: ${limits.videoCount}/${MAX_VIDEOS_PER_DAY}\nChats today: ${limits.chatCount}/${MAX_CHATS_PER_DAY}`,
+        { parse_mode: 'Markdown', ...mainMenu }
+    );
+});
+
+bot.action('contact', async (ctx) => {
+    await ctx.editMessageText(
+        `🆘 *Contact*\n\n👨‍💻 ${DEVELOPER_CONTACT}`,
+        Markup.inlineKeyboard([
+            [Markup.button.url('📩 Contact', `https://t.me/${DEVELOPER_CONTACT.replace('@', '')}`)],
+            [Markup.button.callback('🔙 Back', 'back_to_menu')]
+        ]),
+        { parse_mode: 'Markdown' }
+    );
+});
