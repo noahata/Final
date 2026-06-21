@@ -509,3 +509,152 @@ bot.action('contact', async (ctx) => {
         { parse_mode: 'Markdown' }
     );
 });
+// ============ IMAGE GENERATION HANDLER ============
+async function handleImage(ctx, prompt) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!checkUserLimit(userId, 'image')) {
+        return ctx.reply(`❌ Daily image limit (${MAX_IMAGES_PER_DAY}) reached. Try again tomorrow.`);
+    }
+    const msg = await ctx.reply(`🎨 Generating image... (may take 20–60 seconds)`);
+    try {
+        const imageBuffer = await generateImage(prompt);
+        session.mode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.sendPhoto(ctx.chat.id, { source: imageBuffer }, {
+            caption: `🖼️ *Generated from:*\n${prompt}`,
+            parse_mode: 'Markdown',
+            ...mainMenu
+        });
+        await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
+    } catch (error) {
+        console.error('Image error:', error.message);
+        session.mode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ *Image generation failed after trying all models.*\n\nError: ${error.message}\n\nPlease try again later.`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    }
+}
+
+// ============ CHAT HANDLER ============
+async function handleChat(ctx, prompt) {
+    const userId = ctx.from.id.toString();
+    const session = userSessions.get(userId);
+    if (!checkUserLimit(userId, 'chat')) {
+        return ctx.reply(`❌ Daily chat limit (${MAX_CHATS_PER_DAY}) reached. Try again tomorrow.`);
+    }
+    const msg = await ctx.reply(`💬 Thinking...`);
+    try {
+        const reply = await chatWithDeepSeek(userId, prompt);
+        session.mode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `💬 *AI reply:*\n\n${reply}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    } catch (error) {
+        console.error('Chat error:', error.message);
+        session.mode = null;
+        userSessions.set(userId, session);
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
+            `❌ *Chat error:*\n${error.message}`,
+            { parse_mode: 'Markdown', ...mainMenu }
+        );
+    }
+}
+
+// ============ TEXT HANDLER ============
+bot.on('text', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const text = ctx.message.text;
+    if (text.startsWith('/')) return;
+
+    const session = userSessions.get(userId);
+    if (!session) {
+        addMessage(userId, text, 'user');
+        try {
+            await bot.telegram.sendMessage(ADMIN_ID, `📩 *New from* @${ctx.from.username || 'user'} (ID: ${userId})\n\n${text}`, { parse_mode: 'Markdown' });
+        } catch {}
+        return ctx.reply('Please send /start to use the bot.');
+    }
+
+    // If not in a mode, forward to admin
+    if (!session.mode) {
+        addMessage(userId, text, 'user');
+        try {
+            await bot.telegram.sendMessage(ADMIN_ID, `📩 *New from* @${ctx.from.username || 'user'} (ID: ${userId})\n\n${text}`, { parse_mode: 'Markdown' });
+        } catch {}
+        return ctx.reply('Send /generate to start.');
+    }
+
+    // Handle modes
+    if (session.mode === 'image') await handleImage(ctx, text);
+    else if (session.mode === 'chat') await handleChat(ctx, text);
+    else {
+        session.mode = null;
+        userSessions.set(userId, session);
+        ctx.reply('Unknown mode. Send /generate.');
+    }
+});
+
+// ============ ADMIN COMMANDS (Telegram) ============
+bot.command('list', async (ctx) => {
+    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
+    const users = Array.from(userMessages.keys());
+    if (users.length === 0) return ctx.reply('No messages.');
+    let msg = '*Recent users:*\n\n';
+    for (const uid of users) {
+        const history = userMessages.get(uid);
+        const last = history[history.length-1];
+        msg += `👤 \`${uid}\` – last: ${last.text.substring(0,30)}...\n`;
+    }
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+bot.command('chat', async (ctx) => {
+    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) return ctx.reply('Usage: /chat <user_id>');
+    const uid = args[1];
+    const history = userMessages.get(uid);
+    if (!history || history.length === 0) return ctx.reply('No messages.');
+    let msg = `*Chat with ${uid}:*\n\n`;
+    for (const entry of history.slice(-20)) {
+        const who = entry.from === 'user' ? '👤 User' : '🤖 Admin';
+        msg += `${who} (${entry.date}): ${entry.text}\n`;
+    }
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+bot.command('reply', async (ctx) => {
+    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
+    const args = ctx.message.text.split(' ');
+    if (args.length < 3) return ctx.reply('Usage: /reply <user_id> <message>');
+    const uid = args[1];
+    const message = args.slice(2).join(' ');
+    try {
+        await bot.telegram.sendMessage(uid, `🤖 *Admin reply:*\n\n${message}`, { parse_mode: 'Markdown' });
+        addMessage(uid, message, 'admin');
+        await ctx.reply(`✅ Replied to ${uid}`);
+    } catch(e) {
+        await ctx.reply(`❌ Failed: ${e.message}`);
+    }
+});
+
+bot.command('broadcast', async (ctx) => {
+    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) return ctx.reply('Usage: /broadcast <message>');
+    const message = args.slice(1).join(' ');
+    const users = Array.from(userSessions.keys());
+    let sent = 0, failed = 0;
+    for (const uid of users) {
+        try {
+            await bot.telegram.sendMessage(uid, `📢 *Broadcast:*\n\n${message}`, { parse_mode: 'Markdown' });
+            sent++;
+        } catch { failed++; }
+    }
+    await ctx.reply(`✅ Broadcast sent to ${sent} users. Failed: ${failed}`);
+});
