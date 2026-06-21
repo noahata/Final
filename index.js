@@ -5,19 +5,27 @@ const path = require('path');
 const axios = require('axios');
 const session = require('express-session');
 const cors = require('cors');
-const OpenAI = require('openai');
+const https = require('https');
+const dns = require('dns');
+
+// Force IPv4 to avoid ENOTFOUND errors
+dns.setDefaultResultOrder('ipv4first');
 
 // ============ CREDENTIALS ============
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = process.env.ADMIN_ID || 'your_telegram_id'; // Replace
+const ADMIN_ID = process.env.ADMIN_ID || 'your_telegram_id'; // Replace with your numeric ID
 const HF_TOKEN = process.env.HF_TOKEN || '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';
-const REQUIRED_CHANNEL = '@bot_Farming';
 
 // ============ CONSTANTS ============
 const PORT = process.env.PORT || 3000;
 const DEVELOPER_CONTACT = '@Ace_spy';
 const BOT_NAME = 'Ace AI';
 const ADMIN_PASSWORD = 'Noah@1221';
+const REQUIRED_CHANNEL = '@bot_Farming';
+
+// Daily limits
+const MAX_IMAGES_PER_DAY = 10;
+const MAX_CHATS_PER_DAY = 50;
 
 // ============ EXPRESS SETUP ============
 const app = express();
@@ -32,25 +40,26 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============ IN‑MEMORY STORES ============
-const userSessions = new Map(); // userId -> { mode: null|'image'|'video'|'chat', history: [] }
+const userSessions = new Map(); // userId -> { mode: null|'image'|'chat', chatHistory: [] }
 const userMessages = new Map(); // userId -> array of { from, text, date }
-const userDailyLimits = new Map(); // userId -> { date, imageCount, videoCount, chatCount }
+const userDailyLimits = new Map(); // userId -> { date, imageCount, chatCount }
+
+// ============ CUSTOM AXIOS INSTANCE (IPv4 + fallback) ============
+const axiosInstance = axios.create({
+    httpsAgent: new https.Agent({ family: 4 }),
+    timeout: 60000
+});
 
 // ============ DAILY LIMITS ============
-const MAX_IMAGES_PER_DAY = 10;
-const MAX_VIDEOS_PER_DAY = 3;
-const MAX_CHATS_PER_DAY = 50;
-
 function checkUserLimit(userId, type) {
     const today = new Date().toISOString().split('T')[0];
-    const record = userDailyLimits.get(userId) || { date: today, imageCount: 0, videoCount: 0, chatCount: 0 };
+    const record = userDailyLimits.get(userId) || { date: today, imageCount: 0, chatCount: 0 };
     if (record.date !== today) {
         record.date = today;
         record.imageCount = 0;
-        record.videoCount = 0;
         record.chatCount = 0;
     }
-    const limits = { image: MAX_IMAGES_PER_DAY, video: MAX_VIDEOS_PER_DAY, chat: MAX_CHATS_PER_DAY };
+    const limits = { image: MAX_IMAGES_PER_DAY, chat: MAX_CHATS_PER_DAY };
     const key = type + 'Count';
     if (record[key] >= limits[type]) return false;
     record[key]++;
@@ -69,13 +78,7 @@ function addMessage(userId, text, from = 'user') {
 // ============ TELEGRAM BOT ============
 const bot = new Telegraf(BOT_TOKEN);
 
-// ============ HUGGING FACE ROUTER FOR DEEPSEEK ============
-const hfOpenAI = new OpenAI({
-    baseURL: 'https://router.huggingface.co/v1',
-    apiKey: HF_TOKEN,
-});
-
-// ============ HF TOKEN ROTATION (for image/video) ============
+// ============ HF TOKEN ROTATION ============
 const HF_TOKENS = [HF_TOKEN];
 // Add more tokens here if you have multiple accounts:
 // const HF_TOKENS = [process.env.HF_TOKEN_1, process.env.HF_TOKEN_2, ...];
@@ -111,7 +114,6 @@ async function checkChannelMembership(userId) {
 // ============ MAIN MENU ============
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('🎨 Generate Image', 'image')],
-    [Markup.button.callback('🎬 Generate Video', 'video')],
     [Markup.button.callback('💬 Chat with AI', 'chat')],
     [Markup.button.callback('📊 Status', 'status')],
     [Markup.button.callback('🆘 Contact', 'contact')]
@@ -288,405 +290,3 @@ app.post('/admin/broadcast', async (req, res) => {
         </html>
     `);
 });
-// ============ AI FUNCTIONS ============
-const HF_IMAGE_MODEL = 'stabilityai/stable-diffusion-2-1';
-const HF_VIDEO_MODEL = 'damo-vilab/text-to-video-ms-1.7b';
-
-async function generateImage(prompt) {
-    const token = getHfToken();
-    if (!token) throw new Error('All tokens rate-limited. Try again in a minute.');
-    const response = await axios({
-        method: 'post',
-        url: `https://api-inference.huggingface.co/models/${HF_IMAGE_MODEL}`,
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { inputs: prompt },
-        responseType: 'arraybuffer',
-        timeout: 60000
-    });
-    return response.data;
-}
-
-async function generateVideo(prompt) {
-    const token = getHfToken();
-    if (!token) throw new Error('All tokens rate-limited. Try again in a minute.');
-    const response = await axios({
-        method: 'post',
-        url: `https://api-inference.huggingface.co/models/${HF_VIDEO_MODEL}`,
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        data: { inputs: prompt },
-        responseType: 'arraybuffer',
-        timeout: 300000 // 5 minutes
-    });
-    return response.data;
-}
-
-async function chatWithDeepSeek(userId, prompt) {
-    const session = userSessions.get(userId);
-    const history = session?.chatHistory || [];
-    try {
-        const completion = await hfOpenAI.chat.completions.create({
-            model: 'deepseek-ai/DeepSeek-V4-Flash',
-            messages: [
-                { role: 'system', content: 'You are a helpful AI assistant.' },
-                ...history,
-                { role: 'user', content: prompt }
-            ],
-        });
-        const reply = completion.choices[0].message.content;
-        // Update history
-        if (session) {
-            session.chatHistory = session.chatHistory || [];
-            session.chatHistory.push({ role: 'user', content: prompt });
-            session.chatHistory.push({ role: 'assistant', content: reply });
-            if (session.chatHistory.length > 20) session.chatHistory = session.chatHistory.slice(-20);
-            userSessions.set(userId, session);
-        }
-        return reply;
-    } catch (error) {
-        console.error('DeepSeek error:', error.message);
-        return 'Sorry, I encountered an error. Please try again later.';
-    }
-}
-
-// ============ BOT START ============
-bot.start(async (ctx) => {
-    const userId = ctx.from.id.toString();
-    if (!userSessions.has(userId)) {
-        userSessions.set(userId, { mode: null, chatHistory: [] });
-    }
-    const isMember = await checkChannelMembership(ctx.from.id);
-    if (!isMember) {
-        return ctx.reply(
-            `❌ *Join ${REQUIRED_CHANNEL} first!*`,
-            Markup.inlineKeyboard([
-                [Markup.button.url('📢 Join Channel', `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`)],
-                [Markup.button.callback('✅ I\'ve joined', 'verify_channel')]
-            ]),
-            { parse_mode: 'Markdown' }
-        );
-    }
-    await ctx.reply(
-        `🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.\n\n📌 You are in the channel.`,
-        { parse_mode: 'Markdown', ...mainMenu }
-    );
-});
-
-bot.action('verify_channel', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const isMember = await checkChannelMembership(ctx.from.id);
-    if (!isMember) {
-        return ctx.answerCbQuery('❌ Not a member yet! Join first.', { show_alert: true });
-    }
-    await ctx.editMessageText(
-        `✅ Verified! You are a member of ${REQUIRED_CHANNEL}.\n\n🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.`,
-        { parse_mode: 'Markdown', ...mainMenu }
-    );
-    await ctx.answerCbQuery('Verified!');
-});
-
-// ============ COMMANDS ============
-bot.command('generate', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (!session) return ctx.reply('Please send /start first.');
-    const isMember = await checkChannelMembership(ctx.from.id);
-    if (!isMember) return ctx.reply(`❌ Join ${REQUIRED_CHANNEL} first.`);
-    await ctx.reply(
-        `🎨 *Choose what to generate:*`,
-        Markup.inlineKeyboard([
-            [Markup.button.callback('🖼️ Image', 'image')],
-            [Markup.button.callback('🎬 Video', 'video')],
-            [Markup.button.callback('💬 Chat', 'chat')],
-            [Markup.button.callback('🔙 Back', 'back_to_menu')]
-        ]),
-        { parse_mode: 'Markdown' }
-    );
-});
-
-bot.command('cancel', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (session) { session.mode = null; userSessions.set(userId, session); }
-    await ctx.reply('✅ Cancelled. Send /generate to start again.', { ...mainMenu });
-});
-
-// ============ ACTIONS ============
-bot.action('image', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (!session) return ctx.reply('Send /start first.');
-    session.mode = 'image';
-    userSessions.set(userId, session);
-    await ctx.editMessageText(
-        `🎨 *Describe your image*\n\nSend a detailed prompt.\nType /cancel to stop.`,
-        { parse_mode: 'Markdown' }
-    );
-});
-
-bot.action('video', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (!session) return ctx.reply('Send /start first.');
-    session.mode = 'video';
-    userSessions.set(userId, session);
-    await ctx.editMessageText(
-        `🎬 *Describe your video*\n\nSend a detailed prompt (may take 2-5 minutes).\nType /cancel to stop.`,
-        { parse_mode: 'Markdown' }
-    );
-});
-
-bot.action('chat', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (!session) return ctx.reply('Send /start first.');
-    session.mode = 'chat';
-    userSessions.set(userId, session);
-    await ctx.editMessageText(
-        `💬 *Chat with AI*\n\nSend me your message.\nType /cancel to stop.`,
-        { parse_mode: 'Markdown' }
-    );
-});
-
-bot.action('back_to_menu', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (session) { session.mode = null; userSessions.set(userId, session); }
-    await ctx.editMessageText(
-        `🤖 *${BOT_NAME}*\n\nSend /generate or tap a button below.`,
-        { parse_mode: 'Markdown', ...mainMenu }
-    );
-});
-
-bot.action('status', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    const mode = session?.mode || 'idle';
-    const limits = userDailyLimits.get(userId) || { imageCount: 0, videoCount: 0, chatCount: 0 };
-    await ctx.editMessageText(
-        `📊 *Status*\n\nMode: ${mode}\nImages today: ${limits.imageCount}/${MAX_IMAGES_PER_DAY}\nVideos today: ${limits.videoCount}/${MAX_VIDEOS_PER_DAY}\nChats today: ${limits.chatCount}/${MAX_CHATS_PER_DAY}`,
-        { parse_mode: 'Markdown', ...mainMenu }
-    );
-});
-
-bot.action('contact', async (ctx) => {
-    await ctx.editMessageText(
-        `🆘 *Contact*\n\n👨‍💻 ${DEVELOPER_CONTACT}`,
-        Markup.inlineKeyboard([
-            [Markup.button.url('📩 Contact', `https://t.me/${DEVELOPER_CONTACT.replace('@', '')}`)],
-            [Markup.button.callback('🔙 Back', 'back_to_menu')]
-        ]),
-        { parse_mode: 'Markdown' }
-    );
-});
-// ============ IMAGE GENERATION HANDLER ============
-async function handleImage(ctx, prompt) {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (!checkUserLimit(userId, 'image')) {
-        return ctx.reply(`❌ Daily image limit (${MAX_IMAGES_PER_DAY}) reached. Try again tomorrow.`);
-    }
-    const msg = await ctx.reply(`🎨 Generating image... (may take 20–60 seconds)`);
-    try {
-        const imageBuffer = await generateImage(prompt);
-        session.mode = null;
-        userSessions.set(userId, session);
-        await ctx.telegram.sendPhoto(ctx.chat.id, { source: imageBuffer }, {
-            caption: `🖼️ *Generated from:*\n${prompt}`,
-            parse_mode: 'Markdown',
-            ...mainMenu
-        });
-        await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
-    } catch (error) {
-        session.mode = null;
-        userSessions.set(userId, session);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
-            `❌ *Image generation failed:*\n${error.message}\n\nPlease try again later.`,
-            { parse_mode: 'Markdown', ...mainMenu }
-        );
-    }
-}
-
-// ============ VIDEO GENERATION HANDLER ============
-async function handleVideo(ctx, prompt) {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (!checkUserLimit(userId, 'video')) {
-        return ctx.reply(`❌ Daily video limit (${MAX_VIDEOS_PER_DAY}) reached. Try again tomorrow.`);
-    }
-    const msg = await ctx.reply(`🎬 Generating video... (may take 2–5 minutes)`);
-    try {
-        const videoBuffer = await generateVideo(prompt);
-        session.mode = null;
-        userSessions.set(userId, session);
-        await ctx.telegram.sendVideo(ctx.chat.id, { source: videoBuffer }, {
-            caption: `🎬 *Generated from:*\n${prompt}`,
-            parse_mode: 'Markdown',
-            ...mainMenu
-        });
-        await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
-    } catch (error) {
-        session.mode = null;
-        userSessions.set(userId, session);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
-            `❌ *Video generation failed:*\n${error.message}\n\nPlease try again later.`,
-            { parse_mode: 'Markdown', ...mainMenu }
-        );
-    }
-}
-
-// ============ CHAT HANDLER ============
-async function handleChat(ctx, prompt) {
-    const userId = ctx.from.id.toString();
-    const session = userSessions.get(userId);
-    if (!checkUserLimit(userId, 'chat')) {
-        return ctx.reply(`❌ Daily chat limit (${MAX_CHATS_PER_DAY}) reached. Try again tomorrow.`);
-    }
-    const msg = await ctx.reply(`💬 Thinking...`);
-    try {
-        const reply = await chatWithDeepSeek(userId, prompt);
-        session.mode = null;
-        userSessions.set(userId, session);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
-            `💬 *AI reply:*\n\n${reply}`,
-            { parse_mode: 'Markdown', ...mainMenu }
-        );
-    } catch (error) {
-        session.mode = null;
-        userSessions.set(userId, session);
-        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null,
-            `❌ *Chat error:*\n${error.message}`,
-            { parse_mode: 'Markdown', ...mainMenu }
-        );
-    }
-}
-
-// ============ TEXT HANDLER ============
-bot.on('text', async (ctx) => {
-    const userId = ctx.from.id.toString();
-    const text = ctx.message.text;
-    if (text.startsWith('/')) return;
-
-    const session = userSessions.get(userId);
-    if (!session) {
-        // Not registered
-        addMessage(userId, text, 'user');
-        try {
-            await bot.telegram.sendMessage(ADMIN_ID, `📩 *New from* @${ctx.from.username || 'user'} (ID: ${userId})\n\n${text}`, { parse_mode: 'Markdown' });
-        } catch {}
-        return ctx.reply('Please send /start to use the bot.');
-    }
-
-    // If not in a mode, forward to admin
-    if (!session.mode) {
-        addMessage(userId, text, 'user');
-        try {
-            await bot.telegram.sendMessage(ADMIN_ID, `📩 *New from* @${ctx.from.username || 'user'} (ID: ${userId})\n\n${text}`, { parse_mode: 'Markdown' });
-        } catch {}
-        return ctx.reply('Send /generate to start.');
-    }
-
-    // Handle modes
-    if (session.mode === 'image') await handleImage(ctx, text);
-    else if (session.mode === 'video') await handleVideo(ctx, text);
-    else if (session.mode === 'chat') await handleChat(ctx, text);
-    else {
-        session.mode = null;
-        userSessions.set(userId, session);
-        ctx.reply('Unknown mode. Send /generate.');
-    }
-});
-
-// ============ ADMIN COMMANDS (Telegram) ============
-bot.command('list', async (ctx) => {
-    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
-    const users = Array.from(userMessages.keys());
-    if (users.length === 0) return ctx.reply('No messages.');
-    let msg = '*Recent users:*\n\n';
-    for (const uid of users) {
-        const history = userMessages.get(uid);
-        const last = history[history.length-1];
-        msg += `👤 \`${uid}\` – last: ${last.text.substring(0,30)}...\n`;
-    }
-    await ctx.reply(msg, { parse_mode: 'Markdown' });
-});
-
-bot.command('chat', async (ctx) => {
-    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
-    const args = ctx.message.text.split(' ');
-    if (args.length < 2) return ctx.reply('Usage: /chat <user_id>');
-    const uid = args[1];
-    const history = userMessages.get(uid);
-    if (!history || history.length === 0) return ctx.reply('No messages.');
-    let msg = `*Chat with ${uid}:*\n\n`;
-    for (const entry of history.slice(-20)) {
-        const who = entry.from === 'user' ? '👤 User' : '🤖 Admin';
-        msg += `${who} (${entry.date}): ${entry.text}\n`;
-    }
-    await ctx.reply(msg, { parse_mode: 'Markdown' });
-});
-
-bot.command('reply', async (ctx) => {
-    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
-    const args = ctx.message.text.split(' ');
-    if (args.length < 3) return ctx.reply('Usage: /reply <user_id> <message>');
-    const uid = args[1];
-    const message = args.slice(2).join(' ');
-    try {
-        await bot.telegram.sendMessage(uid, `🤖 *Admin reply:*\n\n${message}`, { parse_mode: 'Markdown' });
-        addMessage(uid, message, 'admin');
-        await ctx.reply(`✅ Replied to ${uid}`);
-    } catch(e) {
-        await ctx.reply(`❌ Failed: ${e.message}`);
-    }
-});
-
-bot.command('broadcast', async (ctx) => {
-    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('⛔ Admin only.');
-    const args = ctx.message.text.split(' ');
-    if (args.length < 2) return ctx.reply('Usage: /broadcast <message>');
-    const message = args.slice(1).join(' ');
-    const users = Array.from(userSessions.keys());
-    let sent = 0, failed = 0;
-    for (const uid of users) {
-        try {
-            await bot.telegram.sendMessage(uid, `📢 *Broadcast:*\n\n${message}`, { parse_mode: 'Markdown' });
-            sent++;
-        } catch { failed++; }
-    }
-    await ctx.reply(`✅ Broadcast sent to ${sent} users. Failed: ${failed}`);
-});
-// ============ START SERVER ============
-console.log(`🚀 Starting ${BOT_NAME}...`);
-bot.launch().then(() => {
-    console.log(`🤖 ${BOT_NAME} started!`);
-    console.log(`🎨 Image: ${HF_IMAGE_MODEL}`);
-    console.log(`🎬 Video: ${HF_VIDEO_MODEL}`);
-    console.log(`💬 Chat: DeepSeek via Hugging Face`);
-});
-
-app.listen(PORT, () => {
-    console.log(`🌐 Server on port ${PORT}`);
-    console.log(`👑 Admin panel: /admin (password: ${ADMIN_PASSWORD})`);
-});
-
-// ============ PERIODIC CLEANUP ============
-setInterval(() => {
-    // No temp files in this version
-    console.log('🧹 Cleanup check done.');
-}, 60000);
-
-// ============ ERROR HANDLING ============
-process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception:', err);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-console.log(`✅ ${BOT_NAME} Ready!`);
-console.log(`📢 Required channel: ${REQUIRED_CHANNEL}`);
-console.log(`🆘 Contact: ${DEVELOPER_CONTACT}`);
-console.log(`👑 Admin ID: ${ADMIN_ID}`);
-
-module.exports = { bot, app };
