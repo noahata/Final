@@ -658,3 +658,36 @@ bot.command('broadcast', async (ctx) => {
     }
     await ctx.reply(`✅ Broadcast sent to ${sent} users. Failed: ${failed}`);
 });
+// ============ START SERVER ============
+console.log(`🚀 Starting ${BOT_NAME}...`);
+bot.launch().then(() => {
+    console.log(`🤖 ${BOT_NAME} started!`);
+    console.log(`🎨 Image: ${IMAGE_MODELS[0]}`);
+    console.log(`💬 Chat: ${CHAT_MODELS[0]}`);
+});
+
+app.listen(PORT, () => {
+    console.log(`🌐 Server on port ${PORT}`);
+    console.log(`👑 Admin panel: /admin (password: ${ADMIN_PASSWORD})`);
+});
+
+// ============ PERIODIC CLEANUP ============
+setInterval(() => {
+    console.log('🧹 Cleanup check done.');
+}, 60000);
+
+// ============ ERROR HANDLING ============
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+console.log(`✅ ${BOT_NAME} Ready!`);
+console.log(`📢 Required channel: ${REQUIRED_CHANNEL}`);
+console.log(`🆘 Contact: ${DEVELOPER_CONTACT}`);
+console.log(`👑 Admin ID: ${ADMIN_ID}`);
+
+module.exports = { bot, app };
