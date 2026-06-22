@@ -1,4 +1,4 @@
-const { Telegraf, session, Markup, Scenes } = require('telegraf');
+const { Telegraf, session, Markup } = require('telegraf');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -7,7 +7,7 @@ const path = require('path');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN environment variable missing.');
 
-// ⚠️ CHANGE THIS TO YOUR TELEGRAM USER ID
+// ⚠️ CHANGE THIS IF 6596414316 IS NOT YOUR TELEGRAM ID
 const ADMIN_ID = 6596414316;
 
 const TELEBIRR_NUMBER = '0986179505';
@@ -17,9 +17,8 @@ const CONFIG_FILE = path.join(__dirname, 'config.json');
 
 function loadConfig() {
     if (!fs.existsSync(CONFIG_FILE)) {
-        const defaultConfig = { payment_paused: false };
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
-        return defaultConfig;
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify({ payment_paused: false }, null, 2));
+        return { payment_paused: false };
     }
     try {
         return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
@@ -33,8 +32,7 @@ function saveConfig(config) {
 }
 
 function isPaymentPaused() {
-    const config = loadConfig();
-    return config.payment_paused === true;
+    return loadConfig().payment_paused === true;
 }
 
 function togglePaymentPaused() {
@@ -44,7 +42,7 @@ function togglePaymentPaused() {
     return config.payment_paused;
 }
 
-// ==================== BALANCE STORAGE (JSON file) ====================
+// ==================== BALANCE STORAGE ====================
 const BALANCE_FILE = path.join(__dirname, 'balances.json');
 
 function loadBalances() {
@@ -111,7 +109,7 @@ const depositScene = new WizardScene(
     'deposit',
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Payments are currently paused by admin. Please try again later.');
+            await ctx.reply('🛑 Payments are paused. Try later.');
             return ctx.scene.leave();
         }
         await ctx.reply('Enter amount in Birr to deposit:');
@@ -119,46 +117,39 @@ const depositScene = new WizardScene(
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            await ctx.reply('🛑 Payments paused. Cancelled.');
             return ctx.scene.leave();
         }
         const amount = parseFloat(ctx.message.text);
         if (isNaN(amount) || amount <= 0) {
-            await ctx.reply('Please enter a valid positive number.');
+            await ctx.reply('Enter a valid positive number.');
             return;
         }
         ctx.wizard.state.amount = amount;
         await ctx.reply(
-            `💳 Please send exactly **${amount} Birr** to Telebirr number:\n` +
+            `💳 Send exactly **${amount} Birr** to Telebirr:\n` +
             `\`${TELEBIRR_NUMBER}\`\n\n` +
-            `After sending, take a screenshot of the payment confirmation and send it here.\n` +
-            `📸 Send the screenshot as a photo.`
+            `Then send a screenshot here.`
         );
-        await ctx.reply('📤 Send the screenshot now.');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            await ctx.reply('🛑 Payments paused. Cancelled.');
             return ctx.scene.leave();
         }
         const photo = ctx.message.photo;
         if (!photo) {
-            await ctx.reply('Please send a photo (screenshot) of your payment confirmation.');
+            await ctx.reply('Please send a photo (screenshot).');
             return;
         }
         const userId = ctx.from.id;
         const amount = ctx.wizard.state.amount;
         const caption =
-            `📥 Deposit Screenshot\n` +
-            `User: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\n` +
-            `Amount: ${amount} Birr\n` +
-            `Please verify and credit balance using /addbalance ${userId} ${amount}`;
+            `📥 Deposit Screenshot\nUser: ${userId} (${ctx.from.first_name || ''})\nAmount: ${amount} Birr\n` +
+            `Use /addbalance ${userId} ${amount} to credit.`;
         await ctx.telegram.sendPhoto(ADMIN_ID, photo[photo.length - 1].file_id, { caption });
-        await ctx.reply(
-            `✅ Screenshot sent to admin. Your deposit will be verified and credited shortly.`,
-            walletKeyboard
-        );
+        await ctx.reply('✅ Screenshot sent to admin for verification.', walletKeyboard);
         return ctx.scene.leave();
     }
 );
@@ -168,40 +159,40 @@ const withdrawScene = new WizardScene(
     'withdraw',
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Payments are paused. Withdrawals are temporarily disabled.');
+            await ctx.reply('🛑 Withdrawals paused.');
             return ctx.scene.leave();
         }
-        await ctx.reply('Enter amount to withdraw (min 5, max 25 Birr, fee 1 Birr):');
+        await ctx.reply('Amount (min 5, max 25, fee 1 Birr):');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const amount = parseFloat(ctx.message.text);
         if (isNaN(amount) || amount < 5 || amount > 25) {
-            await ctx.reply('Amount must be between 5 and 25. Try again.');
+            await ctx.reply('Enter between 5 and 25.');
             return;
         }
         const userId = ctx.from.id;
         const balance = getBalance(userId);
         if (balance < amount + 1) {
-            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${amount + 1} (amount + fee).`);
+            await ctx.reply(`Insufficient balance. You have ${balance}, need ${amount + 1}.`);
             return ctx.scene.leave();
         }
         ctx.wizard.state.amount = amount;
-        await ctx.reply('Enter your Telebirr phone number (09XXXXXXXX):');
+        await ctx.reply('Enter Telebirr phone (09XXXXXXXX):');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const phone = ctx.message.text.trim();
         if (!phone.match(/^09\d{8}$/)) {
-            await ctx.reply('Invalid phone number. Enter 09XXXXXXXX.');
+            await ctx.reply('Invalid. Enter 09XXXXXXXX.');
             return;
         }
         const userId = ctx.from.id;
@@ -210,12 +201,9 @@ const withdrawScene = new WizardScene(
         const newBalance = addBalance(userId, -(amount + 1));
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `📤 Withdrawal Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nAmount: ${amount} Birr\nNet: ${netAmount} Birr\nPhone: ${phone}\nNew balance: ${newBalance}`
+            `📤 Withdrawal\nUser: ${userId}\nAmount: ${amount}\nNet: ${netAmount}\nPhone: ${phone}\nNew balance: ${newBalance}`
         );
-        await ctx.reply(
-            `✅ Withdrawal request sent. You will receive ${netAmount} Birr within 24‑48 hours after admin approval.`,
-            walletKeyboard
-        );
+        await ctx.reply(`✅ Request sent. You'll receive ${netAmount} Birr after admin approval.`, walletKeyboard);
         return ctx.scene.leave();
     }
 );
@@ -225,50 +213,49 @@ const botStartScene = new WizardScene(
     'botstart',
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Please try again later.');
+            await ctx.reply('🛑 Purchases paused.');
             return ctx.scene.leave();
         }
-        await ctx.reply('Send me the bot link (e.g., https://t.me/SomeBot or https://t.me/SomeBot/app?startapp=xxx)');
+        await ctx.reply('Send bot link (e.g., https://t.me/SomeBot):');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const link = ctx.message.text.trim();
         if (!link.includes('t.me/')) {
-            await ctx.reply('Invalid link. Must contain t.me/');
+            await ctx.reply('Invalid. Must contain t.me/');
             return;
         }
-        const converted = convertBotLink(link);
-        ctx.wizard.state.link = converted;
-        await ctx.reply('How many starts do you want? (1‑10)');
+        ctx.wizard.state.link = convertBotLink(link);
+        await ctx.reply('How many starts? (1‑10)');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const qty = parseInt(ctx.message.text);
         if (isNaN(qty) || qty < 1 || qty > 10) {
-            await ctx.reply('Enter a number between 1 and 10.');
+            await ctx.reply('Enter 1‑10.');
             return;
         }
         const userId = ctx.from.id;
         const totalCost = qty * 1;
         const balance = getBalance(userId);
         if (balance < totalCost) {
-            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${totalCost}.`);
+            await ctx.reply(`Insufficient balance. You have ${balance}, need ${totalCost}.`);
             return ctx.scene.leave();
         }
         addBalance(userId, -totalCost);
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `🤖 Bot Start Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nBot link: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr\nRemaining balance: ${getBalance(userId)}`
+            `🤖 Bot Start Order\nUser: ${userId}\nLink: ${ctx.wizard.state.link}\nQty: ${qty}\nCost: ${totalCost} Birr\nBalance: ${getBalance(userId)}`
         );
-        await ctx.reply(`✅ Order submitted. ${totalCost} Birr deducted. You will be notified when processed.`);
+        await ctx.reply(`✅ Order placed. ${totalCost} Birr deducted. Admin will process.`);
         return ctx.scene.leave();
     }
 );
@@ -278,49 +265,49 @@ const channelScene = new WizardScene(
     'channel',
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Please try again later.');
+            await ctx.reply('🛑 Purchases paused.');
             return ctx.scene.leave();
         }
-        await ctx.reply('⚠️ Warning: The bot must be admin in the channel to verify members.\n\nSend channel link (e.g., https://t.me/ChannelName)');
+        await ctx.reply('⚠️ Bot must be admin in the channel.\nSend channel link:');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const link = ctx.message.text.trim();
         if (!link.includes('t.me/')) {
-            await ctx.reply('Invalid link. Must contain t.me/');
+            await ctx.reply('Invalid.');
             return;
         }
         ctx.wizard.state.link = link;
-        await ctx.reply('How many members do you want? (1‑10)');
+        await ctx.reply('How many members? (1‑10)');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const qty = parseInt(ctx.message.text);
         if (isNaN(qty) || qty < 1 || qty > 10) {
-            await ctx.reply('Enter a number between 1 and 10.');
+            await ctx.reply('Enter 1‑10.');
             return;
         }
         const userId = ctx.from.id;
         const totalCost = qty * 1;
         const balance = getBalance(userId);
         if (balance < totalCost) {
-            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${totalCost}.`);
+            await ctx.reply(`Insufficient balance. You have ${balance}, need ${totalCost}.`);
             return ctx.scene.leave();
         }
         addBalance(userId, -totalCost);
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `📢 Channel Subscribe Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nChannel: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr\nRemaining balance: ${getBalance(userId)}`
+            `📢 Channel Subscribe\nUser: ${userId}\nChannel: ${ctx.wizard.state.link}\nQty: ${qty}\nCost: ${totalCost} Birr\nBalance: ${getBalance(userId)}`
         );
-        await ctx.reply(`✅ Order submitted. ${totalCost} Birr deducted. You will be notified when processed.`);
+        await ctx.reply(`✅ Order placed. ${totalCost} Birr deducted. Admin will process.`);
         return ctx.scene.leave();
     }
 );
@@ -330,87 +317,79 @@ const groupScene = new WizardScene(
     'group',
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Please try again later.');
+            await ctx.reply('🛑 Purchases paused.');
             return ctx.scene.leave();
         }
-        await ctx.reply('⚠️ Warning: The bot must be admin in the group to verify members.\n\nSend group invite link or username (e.g., https://t.me/GroupName)');
+        await ctx.reply('⚠️ Bot must be admin in the group.\nSend group link:');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const link = ctx.message.text.trim();
         if (!link.includes('t.me/')) {
-            await ctx.reply('Invalid link. Must contain t.me/');
+            await ctx.reply('Invalid.');
             return;
         }
         ctx.wizard.state.link = link;
-        await ctx.reply('How many members do you want? (1‑10)');
+        await ctx.reply('How many members? (1‑10)');
         return ctx.wizard.next();
     },
     async (ctx) => {
         if (isPaymentPaused()) {
-            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            await ctx.reply('🛑 Paused. Cancelled.');
             return ctx.scene.leave();
         }
         const qty = parseInt(ctx.message.text);
         if (isNaN(qty) || qty < 1 || qty > 10) {
-            await ctx.reply('Enter a number between 1 and 10.');
+            await ctx.reply('Enter 1‑10.');
             return;
         }
         const userId = ctx.from.id;
         const totalCost = qty * 1;
         const balance = getBalance(userId);
         if (balance < totalCost) {
-            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${totalCost}.`);
+            await ctx.reply(`Insufficient balance. You have ${balance}, need ${totalCost}.`);
             return ctx.scene.leave();
         }
         addBalance(userId, -totalCost);
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `👑 Group Join Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nGroup: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr\nRemaining balance: ${getBalance(userId)}`
+            `👑 Group Join\nUser: ${userId}\nGroup: ${ctx.wizard.state.link}\nQty: ${qty}\nCost: ${totalCost} Birr\nBalance: ${getBalance(userId)}`
         );
-        await ctx.reply(`✅ Order submitted. ${totalCost} Birr deducted. You will be notified when processed.`);
+        await ctx.reply(`✅ Order placed. ${totalCost} Birr deducted. Admin will process.`);
         return ctx.scene.leave();
     }
 );
 
-// ---------- Earn Scene ----------
-const earnScene = new WizardScene(
-    'earn',
-    async (ctx) => {
-        await ctx.reply(
-            '📌 To earn, you can complete tasks provided by admin.\n' +
-            'Click the button below to request available tasks.',
-            Markup.inlineKeyboard([
-                Markup.button.callback('📋 Request Tasks', 'request_tasks')
-            ])
-        );
-        return ctx.wizard.next();
-    },
-    async (ctx) => {
-        // unused
-        return;
-    }
-);
+// ==================== EARN HANDLER ====================
+bot.hears('💲Earn', async (ctx) => {
+    await ctx.reply(
+        '📌 To earn, you can complete tasks provided by admin.\n' +
+        'Click the button below to request available tasks.',
+        Markup.inlineKeyboard([
+            Markup.button.callback('📋 Request Tasks', 'request_tasks')
+        ])
+    );
+});
 
 bot.action('request_tasks', async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id;
+    const name = ctx.from.first_name || '';
     await ctx.telegram.sendMessage(
         ADMIN_ID,
-        `📋 Task Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nWants available tasks.`
+        `📋 Task Request\nUser: ${userId} (${name}) wants tasks.`
     );
-    await ctx.reply('✅ Your request has been sent to admin. They will contact you with available tasks.');
+    await ctx.reply('✅ Request sent to admin. They will contact you with available tasks.');
     await ctx.reply('Main menu', mainKeyboard);
-    await ctx.scene.leave();
 });
 
 // ==================== COMMAND HANDLERS ====================
 bot.start(async (ctx) => {
-    await ctx.reply('Welcome to SniAdsEarnBot!\nAdvertise and earn money.\nUse the buttons below.', mainKeyboard);
+    await ctx.reply('Welcome to SniAdsEarnBot!\nUse the buttons below.', mainKeyboard);
 });
 
 bot.hears('💰Wallet', async (ctx) => {
@@ -430,10 +409,6 @@ bot.hears('👑Get Group Join', async (ctx) => {
     await ctx.scene.enter('group');
 });
 
-bot.hears('💲Earn', async (ctx) => {
-    await ctx.scene.enter('earn');
-});
-
 bot.hears('📥Deposit', async (ctx) => {
     await ctx.scene.enter('deposit');
 });
@@ -447,9 +422,12 @@ bot.hears('🔙Back', async (ctx) => {
 });
 
 // ==================== ADMIN COMMANDS ====================
+function isAdmin(ctx) {
+    return ctx.from.id === ADMIN_ID;
+}
 
 bot.command('checkbalance', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+    if (!isAdmin(ctx)) return;
     const args = ctx.message.text.split(' ');
     if (args.length < 2) {
         await ctx.reply('Usage: /checkbalance <user_id>');
@@ -465,7 +443,7 @@ bot.command('checkbalance', async (ctx) => {
 });
 
 bot.command('addbalance', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+    if (!isAdmin(ctx)) return;
     const args = ctx.message.text.split(' ');
     if (args.length < 3) {
         await ctx.reply('Usage: /addbalance <user_id> <amount>');
@@ -478,11 +456,11 @@ bot.command('addbalance', async (ctx) => {
         return;
     }
     const newBalance = addBalance(userId, amount);
-    await ctx.reply(`Added ${amount} Birr to user ${userId}. New balance: ${newBalance}`);
+    await ctx.reply(`Added ${amount} Birr. New balance: ${newBalance}`);
 });
 
 bot.command('deductbalance', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+    if (!isAdmin(ctx)) return;
     const args = ctx.message.text.split(' ');
     if (args.length < 3) {
         await ctx.reply('Usage: /deductbalance <user_id> <amount>');
@@ -491,20 +469,20 @@ bot.command('deductbalance', async (ctx) => {
     const userId = parseInt(args[1]);
     const amount = parseFloat(args[2]);
     if (isNaN(userId) || isNaN(amount) || amount <= 0) {
-        await ctx.reply('Invalid user ID or amount.');
+        await ctx.reply('Invalid.');
         return;
     }
     const balance = getBalance(userId);
     if (balance < amount) {
-        await ctx.reply(`User ${userId} only has ${balance} Birr. Cannot deduct ${amount}.`);
+        await ctx.reply(`User only has ${balance} Birr. Cannot deduct ${amount}.`);
         return;
     }
     const newBalance = addBalance(userId, -amount);
-    await ctx.reply(`Deducted ${amount} Birr from user ${userId}. New balance: ${newBalance}`);
+    await ctx.reply(`Deducted ${amount} Birr. New balance: ${newBalance}`);
 });
 
 bot.command('setbalance', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+    if (!isAdmin(ctx)) return;
     const args = ctx.message.text.split(' ');
     if (args.length < 3) {
         await ctx.reply('Usage: /setbalance <user_id> <amount>');
@@ -520,38 +498,75 @@ bot.command('setbalance', async (ctx) => {
     await ctx.reply(`Balance for user ${userId} set to ${amount} Birr.`);
 });
 
-// ===== NEW: Toggle payment pause =====
 bot.command('togglepayments', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+    if (!isAdmin(ctx)) return;
     const newStatus = togglePaymentPaused();
     const statusText = newStatus ? '🛑 PAUSED' : '✅ ACTIVE';
     await ctx.reply(`Payment status changed to: ${statusText}`);
 });
 
 bot.command('paymentstatus', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return;
+    if (!isAdmin(ctx)) return;
     const paused = isPaymentPaused();
-    const statusText = paused ? '🛑 PAUSED' : '✅ ACTIVE';
-    await ctx.reply(`Current payment status: ${statusText}`);
+    await ctx.reply(`Current status: ${paused ? '🛑 PAUSED' : '✅ ACTIVE'}`);
 });
 
 // ==================== REGISTER SCENES ====================
-const stage = new Stage([depositScene, withdrawScene, botStartScene, channelScene, groupScene, earnScene]);
+const stage = new Stage([depositScene, withdrawScene, botStartScene, channelScene, groupScene]);
 bot.use(stage.middleware());
 
-// ==================== EXPRESS SERVER (for Render) ====================
+// ==================== EXPRESS SERVER WITH WEBHOOK ====================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-    res.send('Bot is running.');
-});
+// Determine the webhook URL
+let WEBHOOK_URL = process.env.WEBHOOK_URL;
+if (!WEBHOOK_URL) {
+    // If running on Render, use RENDER_EXTERNAL_URL
+    const renderUrl = process.env.RENDER_EXTERNAL_URL;
+    if (renderUrl) {
+        WEBHOOK_URL = `${renderUrl}/webhook`;
+    } else {
+        // Fallback for local development – use polling instead
+        console.warn('No webhook URL provided. Falling back to polling.');
+    }
+}
+
+// If we have a webhook URL, set it and use webhook mode
+if (WEBHOOK_URL) {
+    // Set webhook on startup
+    bot.telegram.setWebhook(WEBHOOK_URL).then((ok) => {
+        if (ok) {
+            console.log(`✅ Webhook set to ${WEBHOOK_URL}`);
+        } else {
+            console.error('❌ Failed to set webhook');
+        }
+    }).catch(err => {
+        console.error('Error setting webhook:', err);
+    });
+
+    // Use webhook callback
+    app.use(express.json());
+    app.use('/webhook', bot.webhookCallback('/webhook'));
+} else {
+    // Fallback to polling if no webhook URL
+    console.log('⚠️ No webhook URL, using polling.');
+    bot.launch().then(() => console.log('🤖 Bot started in polling mode.'));
+}
+
+// Health check endpoint
+app.get('/', (req, res) => res.send('Bot is running with webhooks.'));
 
 app.listen(PORT, () => {
     console.log(`✅ Web server listening on port ${PORT}`);
 });
 
-// ==================== LAUNCH BOT ====================
-bot.launch().then(() => console.log('🤖 Bot started (Telebirr deposit version).'));
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// Graceful stop for polling fallback
+process.once('SIGINT', () => {
+    if (!WEBHOOK_URL) bot.stop('SIGINT');
+    process.exit(0);
+});
+process.once('SIGTERM', () => {
+    if (!WEBHOOK_URL) bot.stop('SIGTERM');
+    process.exit(0);
+});
