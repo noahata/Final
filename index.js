@@ -1,186 +1,41 @@
-// ==================== PART 1 ====================
-// Copy everything below and paste into index.js (first half)
-
-const { Telegraf, session, Markup, Scenes, Composer } = require('telegraf');
-const sqlite3 = require('sqlite3').verbose();
+const { Telegraf, session, Markup, Scenes } = require('telegraf');
 const express = require('express');
 const axios = require('axios');
-const crypto = require('crypto');
 
 // ==================== CONFIG ====================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN environment variable missing.');
 
-// Hardcoded settings (change as needed)
-const ADMIN_ID = 6596414316;
-const EARN_RATE = 0.5;          // paid to worker per task
-const BUY_RATE = 1.0;           // charged to buyer per unit
-const WITHDRAW_MIN = 5;
-const WITHDRAW_MAX = 25;
-const WITHDRAW_FEE = 1.0;
-const CHAPA_PUBLIC = 'CHAPUBK-VEVdXIbNH7NduotligB37ahBxZEhuBxE';
+// ⚠️ CHANGE THIS TO YOUR OWN TELEGRAM USER ID
+const ADMIN_ID = 6596414316;  // <--- replace with your numeric ID
+
+// Chapa keys (hardcoded – replace with your own if needed)
 const CHAPA_SECRET = 'CHASECK-X336iOa0QhxUCUOdUeq8g3X6JpgwFLn2';
-const CHAPA_WEBHOOK_SECRET = 'your_webhook_secret'; // optional
+const CHAPA_PUBLIC = 'CHAPUBK-VEVdXIbNH7NduotligB37ahBxZEhuBxE';
 
-// ==================== DATABASE SETUP ====================
-const db = new sqlite3.Database('./bot_data.db');
+// ==================== BOT SETUP ====================
+const bot = new Telegraf(BOT_TOKEN);
+bot.use(session());
 
-// Promisify db methods
-const dbGet = (sql, params = []) => new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => { if (err) reject(err); else resolve(row); });
-});
-const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
-    db.run(sql, params, function(err) { if (err) reject(err); else resolve(this); });
-});
-const dbAll = (sql, params = []) => new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => { if (err) reject(err); else resolve(rows); });
-});
+// ==================== KEYBOARDS ====================
+const mainKeyboard = Markup.keyboard([
+    ['💰Wallet', '🤖Get Bot Start'],
+    ['📢Get Channel Subscribe', '👑Get Group Join'],
+    ['💲Earn']
+]).resize();
 
-// Initialize tables
-const initDB = async () => {
-    await dbRun(`CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        last_name TEXT,
-        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`);
-    await dbRun(`CREATE TABLE IF NOT EXISTS wallets (
-        user_id INTEGER PRIMARY KEY,
-        balance REAL DEFAULT 0.0,
-        total_earned REAL DEFAULT 0.0,
-        total_spent REAL DEFAULT 0.0
-    )`);
-    await dbRun(`CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        amount REAL,
-        type TEXT,
-        status TEXT DEFAULT 'pending',
-        reference TEXT,
-        description TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP
-    )`);
-    await dbRun(`CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyer_id INTEGER,
-        service_type TEXT,
-        target_link TEXT,
-        quantity INTEGER,
-        total_cost REAL,
-        status TEXT DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP
-    )`);
-    await dbRun(`CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        order_id INTEGER,
-        service_type TEXT,
-        target_link TEXT,
-        status TEXT DEFAULT 'available',
-        worker_id INTEGER,
-        taken_at TIMESTAMP,
-        completed_at TIMESTAMP,
-        reward REAL DEFAULT 0.5
-    )`);
-    await dbRun(`CREATE TABLE IF NOT EXISTS withdrawals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        amount REAL,
-        fee REAL DEFAULT 1.0,
-        net_amount REAL,
-        phone_number TEXT,
-        status TEXT DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        processed_at TIMESTAMP
-    )`);
-};
-initDB().catch(console.error);
-
-// ==================== DB HELPER FUNCTIONS ====================
-async function registerUser(user) {
-    await dbRun(
-        `INSERT OR IGNORE INTO users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)`,
-        [user.id, user.username, user.first_name, user.last_name]
-    );
-    await dbRun(`INSERT OR IGNORE INTO wallets (user_id) VALUES (?)`, [user.id]);
-}
-
-async function getBalance(userId) {
-    const row = await dbGet(`SELECT balance FROM wallets WHERE user_id = ?`, [userId]);
-    return row ? row.balance : 0;
-}
-
-async function updateBalance(userId, amount) {
-    await dbRun(`UPDATE wallets SET balance = balance + ? WHERE user_id = ?`, [amount, userId]);
-}
-
-async function createOrder(buyerId, serviceType, targetLink, quantity, totalCost) {
-    const result = await dbRun(
-        `INSERT INTO orders (buyer_id, service_type, target_link, quantity, total_cost, status) VALUES (?, ?, ?, ?, ?, ?)`,
-        [buyerId, serviceType, targetLink, quantity, totalCost, 'pending']
-    );
-    return result.lastID;
-}
-
-async function generateTasks(orderId, serviceType, targetLink, quantity) {
-    for (let i = 0; i < quantity; i++) {
-        await dbRun(
-            `INSERT INTO tasks (order_id, service_type, target_link, reward) VALUES (?, ?, ?, ?)`,
-            [orderId, serviceType, targetLink, EARN_RATE]
-        );
-    }
-}
-
-async function getAvailableTasks(serviceType = null) {
-    let sql = `SELECT id, service_type, target_link, reward FROM tasks WHERE status = 'available'`;
-    const params = [];
-    if (serviceType) {
-        sql += ` AND service_type = ?`;
-        params.push(serviceType);
-    }
-    return await dbAll(sql, params);
-}
-
-async function claimTask(taskId, workerId) {
-    const result = await dbRun(
-        `UPDATE tasks SET status = 'taken', worker_id = ?, taken_at = CURRENT_TIMESTAMP 
-         WHERE id = ? AND status = 'available'`,
-        [workerId, taskId]
-    );
-    return result.changes > 0;
-}
-
-async function completeTask(taskId, workerId) {
-    const row = await dbGet(
-        `SELECT reward FROM tasks WHERE id = ? AND worker_id = ? AND status = 'taken'`,
-        [taskId, workerId]
-    );
-    if (!row) return false;
-    await dbRun(`UPDATE tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, [taskId]);
-    await updateBalance(workerId, row.reward);
-    return true;
-}
-
-async function createWithdrawal(userId, amount, fee, netAmount, phone) {
-    const result = await dbRun(
-        `INSERT INTO withdrawals (user_id, amount, fee, net_amount, phone_number) VALUES (?, ?, ?, ?, ?)`,
-        [userId, amount, fee, netAmount, phone]
-    );
-    return result.lastID;
-}
+const walletKeyboard = Markup.keyboard([
+    ['📥Deposit', '📥Withdraw'],
+    ['🔙Back']
+]).resize();
 
 // ==================== LINK CONVERTER ====================
 function convertBotLink(link) {
     const match = link.match(/^(https?:\/\/t\.me\/[^\/?]+)\/app\?startapp=(.+)$/);
-    if (match) {
-        return `${match[1]}?start=${match[2]}`;
-    }
-    return link;
+    return match ? `${match[1]}?start=${match[2]}` : link;
 }
 
-// ==================== CHAPA PAYMENT ====================
+// ==================== CHAPA PAYMENT (generate link) ====================
 async function createChapaPayment(amount, email, txRef) {
     const url = 'https://api.chapa.co/v1/transaction/initialize';
     const headers = {
@@ -200,23 +55,7 @@ async function createChapaPayment(amount, email, txRef) {
     return response.data;
 }
 
-// ==================== BOT SETUP ====================
-const bot = new Telegraf(BOT_TOKEN);
-bot.use(session());
-
-// ==================== KEYBOARDS ====================
-const mainKeyboard = Markup.keyboard([
-    ['💰Wallet', '🤖Get Bot Start'],
-    ['📢Get Channel Subscribe', '👑Get Group Join'],
-    ['💲Earn']
-]).resize();
-
-const walletKeyboard = Markup.keyboard([
-    ['📥Deposit', '📥Withdraw'],
-    ['🔙Back']
-]).resize();
-
-// ==================== SCENES (first two) ====================
+// ==================== SCENES ====================
 const { Stage, WizardScene } = Scenes;
 
 // ---------- Deposit Scene ----------
@@ -235,22 +74,23 @@ const depositScene = new WizardScene(
         const userId = ctx.from.id;
         const txRef = `dep_${userId}_${Date.now()}`;
         try {
-            const email = `${userId}@example.com`;
-            const result = await createChapaPayment(amount, email, txRef);
+            const result = await createChapaPayment(amount, `${userId}@example.com`, txRef);
             if (result.status === 'success' && result.data && result.data.checkout_url) {
-                await dbRun(
-                    `INSERT INTO transactions (user_id, amount, type, status, reference) VALUES (?, ?, ?, ?, ?)`,
-                    [userId, amount, 'deposit', 'pending', txRef]
-                );
+                // Send payment link to user
                 await ctx.reply(
-                    `💰 Please complete payment using the link below:\n${result.data.checkout_url}\n\nAfter payment, it will be credited automatically.`
+                    `💰 Deposit link:\n${result.data.checkout_url}\n\nAfter payment, please send a screenshot to admin for manual credit.`
+                );
+                // Forward deposit request to admin
+                await ctx.telegram.sendMessage(
+                    ADMIN_ID,
+                    `📥 Deposit Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nAmount: ${amount} Birr\nTxRef: ${txRef}\nPayment link: ${result.data.checkout_url}`
                 );
             } else {
-                await ctx.reply('Payment initialization failed. Please try again later.');
+                await ctx.reply('Payment initialization failed. Try again later.');
             }
         } catch (error) {
             console.error('Chapa error:', error);
-            await ctx.reply('Payment service error. Please try again later.');
+            await ctx.reply('Payment service error.');
         }
         await ctx.reply('Returning to wallet.', walletKeyboard);
         return ctx.scene.leave();
@@ -261,45 +101,229 @@ const depositScene = new WizardScene(
 const withdrawScene = new WizardScene(
     'withdraw',
     async (ctx) => {
-        await ctx.reply(`Enter amount to withdraw (min ${WITHDRAW_MIN}, max ${WITHDRAW_MAX} Birr, fee ${WITHDRAW_FEE} Birr):`);
+        await ctx.reply('Enter amount to withdraw (min 5, max 25 Birr, fee 1 Birr):');
         return ctx.wizard.next();
     },
     async (ctx) => {
         const amount = parseFloat(ctx.message.text);
-        if (isNaN(amount) || amount < WITHDRAW_MIN || amount > WITHDRAW_MAX) {
-            await ctx.reply(`Amount must be between ${WITHDRAW_MIN} and ${WITHDRAW_MAX}. Try again.`);
+        if (isNaN(amount) || amount < 5 || amount > 25) {
+            await ctx.reply('Amount must be between 5 and 25. Try again.');
             return;
         }
-        const userId = ctx.from.id;
-        const balance = await getBalance(userId);
-        const totalRequired = amount + WITHDRAW_FEE;
-        if (balance < totalRequired) {
-            await ctx.reply(`Insufficient balance. You need ${totalRequired} Birr (amount + fee).`);
-            return ctx.scene.leave();
-        }
         ctx.wizard.state.amount = amount;
-        ctx.wizard.state.netAmount = amount - WITHDRAW_FEE;
-        await ctx.reply('Enter your Telebirr phone number:');
+        await ctx.reply('Enter your Telebirr phone number (09XXXXXXXX):');
         return ctx.wizard.next();
     },
     async (ctx) => {
         const phone = ctx.message.text.trim();
         if (!phone.match(/^09\d{8}$/)) {
-            await ctx.reply('Invalid phone number. Please enter a valid Ethiopian phone (09XXXXXXXX).');
+            await ctx.reply('Invalid phone number. Enter 09XXXXXXXX.');
             return;
         }
         const userId = ctx.from.id;
-        const { amount, netAmount } = ctx.wizard.state;
-        await updateBalance(userId, -(amount + WITHDRAW_FEE));
-        await createWithdrawal(userId, amount, WITHDRAW_FEE, netAmount, phone);
+        const { amount } = ctx.wizard.state;
+        const netAmount = amount - 1; // fee = 1 Birr
+
+        // Forward withdrawal request to admin
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `📥 New withdrawal request:\nUser: ${userId}\nAmount: ${amount} Birr\nNet: ${netAmount} Birr\nPhone: ${phone}\n\nUse /approve_<id> or /reject_<id>`
+            `📤 Withdrawal Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nAmount: ${amount} Birr\nNet: ${netAmount} Birr\nPhone: ${phone}`
         );
-        await ctx.reply(`✅ Withdrawal request submitted. You will receive ${netAmount} Birr within 24-48 hours.`, walletKeyboard);
+        await ctx.reply(
+            `✅ Withdrawal request sent to admin.\nYou will receive ${netAmount} Birr within 24‑48 hours after approval.`,
+            walletKeyboard
+        );
         return ctx.scene.leave();
     }
 );
 
-// ==================== END OF PART 1 ====================
-// Continue with Part 2 below...
+// ---------- Get Bot Start Scene ----------
+const botStartScene = new WizardScene(
+    'botstart',
+    async (ctx) => {
+        await ctx.reply('Send me the bot link (e.g., https://t.me/SomeBot or https://t.me/SomeBot/app?startapp=xxx)');
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        const link = ctx.message.text.trim();
+        if (!link.includes('t.me/')) {
+            await ctx.reply('Invalid link. Must contain t.me/');
+            return;
+        }
+        const converted = convertBotLink(link);
+        ctx.wizard.state.link = converted;
+        await ctx.reply('How many starts do you want? (1‑10)');
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        const qty = parseInt(ctx.message.text);
+        if (isNaN(qty) || qty < 1 || qty > 10) {
+            await ctx.reply('Enter a number between 1 and 10.');
+            return;
+        }
+        const userId = ctx.from.id;
+        const totalCost = qty * 1; // 1 Birr per start
+
+        // Forward order to admin
+        await ctx.telegram.sendMessage(
+            ADMIN_ID,
+            `🤖 Bot Start Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nBot link: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr`
+        );
+        await ctx.reply(`✅ Order submitted to admin. You will be notified when processed.`);
+        return ctx.scene.leave();
+    }
+);
+
+// ---------- Get Channel Subscribe Scene ----------
+const channelScene = new WizardScene(
+    'channel',
+    async (ctx) => {
+        await ctx.reply('⚠️ Warning: The bot must be admin in the channel to verify members.\n\nSend channel link (e.g., https://t.me/ChannelName)');
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        const link = ctx.message.text.trim();
+        if (!link.includes('t.me/')) {
+            await ctx.reply('Invalid link. Must contain t.me/');
+            return;
+        }
+        ctx.wizard.state.link = link;
+        await ctx.reply('How many members do you want? (1‑10)');
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        const qty = parseInt(ctx.message.text);
+        if (isNaN(qty) || qty < 1 || qty > 10) {
+            await ctx.reply('Enter a number between 1 and 10.');
+            return;
+        }
+        const userId = ctx.from.id;
+        const totalCost = qty * 1; // 1 Birr per member
+
+        await ctx.telegram.sendMessage(
+            ADMIN_ID,
+            `📢 Channel Subscribe Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nChannel: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr`
+        );
+        await ctx.reply(`✅ Order submitted to admin. You will be notified when processed.`);
+        return ctx.scene.leave();
+    }
+);
+
+// ---------- Get Group Join Scene ----------
+const groupScene = new WizardScene(
+    'group',
+    async (ctx) => {
+        await ctx.reply('⚠️ Warning: The bot must be admin in the group to verify members.\n\nSend group invite link or username (e.g., https://t.me/GroupName)');
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        const link = ctx.message.text.trim();
+        if (!link.includes('t.me/')) {
+            await ctx.reply('Invalid link. Must contain t.me/');
+            return;
+        }
+        ctx.wizard.state.link = link;
+        await ctx.reply('How many members do you want? (1‑10)');
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        const qty = parseInt(ctx.message.text);
+        if (isNaN(qty) || qty < 1 || qty > 10) {
+            await ctx.reply('Enter a number between 1 and 10.');
+            return;
+        }
+        const userId = ctx.from.id;
+        const totalCost = qty * 1;
+
+        await ctx.telegram.sendMessage(
+            ADMIN_ID,
+            `👑 Group Join Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nGroup: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr`
+        );
+        await ctx.reply(`✅ Order submitted to admin. You will be notified when processed.`);
+        return ctx.scene.leave();
+    }
+);
+
+// ---------- Earn Scene (forward request) ----------
+const earnScene = new WizardScene(
+    'earn',
+    async (ctx) => {
+        await ctx.reply(
+            '📌 To earn, you can complete tasks provided by admin.\n' +
+            'Click the button below to request available tasks.',
+            Markup.inlineKeyboard([
+                Markup.button.callback('📋 Request Tasks', 'request_tasks')
+            ])
+        );
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        // This step is not used; the callback handles it.
+        return;
+    }
+);
+
+// Handle callback for requesting tasks
+bot.action('request_tasks', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    await ctx.telegram.sendMessage(
+        ADMIN_ID,
+        `📋 Task Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nWants available tasks.`
+    );
+    await ctx.reply('✅ Your request has been sent to admin. They will contact you with available tasks.');
+    await ctx.reply('Main menu', mainKeyboard);
+    await ctx.scene.leave();
+});
+
+// ==================== COMMAND HANDLERS ====================
+bot.start(async (ctx) => {
+    await ctx.reply('Welcome to SniAdsEarnBot!\nAdvertise and earn money.\nUse the buttons below.', mainKeyboard);
+});
+
+bot.hears('💰Wallet', async (ctx) => {
+    await ctx.reply('Your balance is managed by admin. Use /balance to request your current balance from admin.');
+    // Optionally forward balance request to admin
+    await ctx.telegram.sendMessage(
+        ADMIN_ID,
+        `💰 Balance Request\nUser: ${ctx.from.id} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})`
+    );
+});
+
+bot.hears('🤖Get Bot Start', async (ctx) => {
+    await ctx.scene.enter('botstart');
+});
+
+bot.hears('📢Get Channel Subscribe', async (ctx) => {
+    await ctx.scene.enter('channel');
+});
+
+bot.hears('👑Get Group Join', async (ctx) => {
+    await ctx.scene.enter('group');
+});
+
+bot.hears('💲Earn', async (ctx) => {
+    await ctx.scene.enter('earn');
+});
+
+bot.hears('📥Deposit', async (ctx) => {
+    await ctx.scene.enter('deposit');
+});
+
+bot.hears('📥Withdraw', async (ctx) => {
+    await ctx.scene.enter('withdraw');
+});
+
+bot.hears('🔙Back', async (ctx) => {
+    await ctx.reply('Main menu', mainKeyboard);
+});
+
+// ==================== REGISTER SCENES ====================
+const stage = new Stage([depositScene, withdrawScene, botStartScene, channelScene, groupScene, earnScene]);
+bot.use(stage.middleware());
+
+// ==================== LAUNCH ====================
+bot.launch().then(() => console.log('Bot started (database‑free mode).'));
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
