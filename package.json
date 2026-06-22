@@ -1,33 +1,17 @@
 {
-  "name": "ace-ai-bot",
+  "name": "sniads-earn-bot",
   "version": "1.0.0",
-  "description": "Ace AI - Telegram bot with image generation and AI chat via Hugging Face",
+  "description": "Telegram advertising bot – admin relay mode, no database",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
   },
-  "keywords": [
-    "telegram",
-    "bot",
-    "ai",
-    "image-generation",
-    "deepseek",
-    "huggingface"
-  ],
-  "author": "Ace Spy",
-  "license": "MIT",
   "dependencies": {
-    "axios": "^1.7.2",
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "express-session": "^1.18.0",
-    "telegraf": "^4.16.3"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+    "telegraf": "^4.16.3",
+    "express": "^4.21.2",
+    "axios": "^1.6.2"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=16.0.0"
   }
 }
