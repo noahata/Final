@@ -1,4 +1,5 @@
 const { Telegraf, session, Markup, Scenes } = require('telegraf');
+const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
@@ -7,9 +8,41 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN environment variable missing.');
 
 // ⚠️ CHANGE THIS TO YOUR TELEGRAM USER ID
-const ADMIN_ID = 6596414316; // <-- replace with your numeric ID
+const ADMIN_ID = 6596414316;
 
-const TELEBIRR_NUMBER = '0986179505'; // Telebirr number to send payment to
+const TELEBIRR_NUMBER = '0986179505';
+
+// ==================== CONFIG FILE (payment toggle) ====================
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+
+function loadConfig() {
+    if (!fs.existsSync(CONFIG_FILE)) {
+        const defaultConfig = { payment_paused: false };
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
+        return defaultConfig;
+    }
+    try {
+        return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    } catch {
+        return { payment_paused: false };
+    }
+}
+
+function saveConfig(config) {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+function isPaymentPaused() {
+    const config = loadConfig();
+    return config.payment_paused === true;
+}
+
+function togglePaymentPaused() {
+    const config = loadConfig();
+    config.payment_paused = !config.payment_paused;
+    saveConfig(config);
+    return config.payment_paused;
+}
 
 // ==================== BALANCE STORAGE (JSON file) ====================
 const BALANCE_FILE = path.join(__dirname, 'balances.json');
@@ -20,8 +53,7 @@ function loadBalances() {
         return {};
     }
     try {
-        const data = fs.readFileSync(BALANCE_FILE, 'utf8');
-        return JSON.parse(data);
+        return JSON.parse(fs.readFileSync(BALANCE_FILE, 'utf8'));
     } catch {
         return {};
     }
@@ -74,21 +106,28 @@ function convertBotLink(link) {
 // ==================== SCENES ====================
 const { Stage, WizardScene } = Scenes;
 
-// ---------- Deposit Scene (Telebirr manual) ----------
+// ---------- Deposit Scene ----------
 const depositScene = new WizardScene(
     'deposit',
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Payments are currently paused by admin. Please try again later.');
+            return ctx.scene.leave();
+        }
         await ctx.reply('Enter amount in Birr to deposit:');
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const amount = parseFloat(ctx.message.text);
         if (isNaN(amount) || amount <= 0) {
             await ctx.reply('Please enter a valid positive number.');
             return;
         }
         ctx.wizard.state.amount = amount;
-        // Show payment instructions
         await ctx.reply(
             `💳 Please send exactly **${amount} Birr** to Telebirr number:\n` +
             `\`${TELEBIRR_NUMBER}\`\n\n` +
@@ -99,7 +138,10 @@ const depositScene = new WizardScene(
         return ctx.wizard.next();
     },
     async (ctx) => {
-        // This step receives the photo
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const photo = ctx.message.photo;
         if (!photo) {
             await ctx.reply('Please send a photo (screenshot) of your payment confirmation.');
@@ -107,7 +149,6 @@ const depositScene = new WizardScene(
         }
         const userId = ctx.from.id;
         const amount = ctx.wizard.state.amount;
-        // Forward the photo to admin with user details
         const caption =
             `📥 Deposit Screenshot\n` +
             `User: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\n` +
@@ -126,10 +167,18 @@ const depositScene = new WizardScene(
 const withdrawScene = new WizardScene(
     'withdraw',
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Payments are paused. Withdrawals are temporarily disabled.');
+            return ctx.scene.leave();
+        }
         await ctx.reply('Enter amount to withdraw (min 5, max 25 Birr, fee 1 Birr):');
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const amount = parseFloat(ctx.message.text);
         if (isNaN(amount) || amount < 5 || amount > 25) {
             await ctx.reply('Amount must be between 5 and 25. Try again.');
@@ -146,6 +195,10 @@ const withdrawScene = new WizardScene(
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Payments are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const phone = ctx.message.text.trim();
         if (!phone.match(/^09\d{8}$/)) {
             await ctx.reply('Invalid phone number. Enter 09XXXXXXXX.');
@@ -154,7 +207,6 @@ const withdrawScene = new WizardScene(
         const userId = ctx.from.id;
         const { amount } = ctx.wizard.state;
         const netAmount = amount - 1;
-        // Deduct balance
         const newBalance = addBalance(userId, -(amount + 1));
         await ctx.telegram.sendMessage(
             ADMIN_ID,
@@ -172,10 +224,18 @@ const withdrawScene = new WizardScene(
 const botStartScene = new WizardScene(
     'botstart',
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Please try again later.');
+            return ctx.scene.leave();
+        }
         await ctx.reply('Send me the bot link (e.g., https://t.me/SomeBot or https://t.me/SomeBot/app?startapp=xxx)');
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const link = ctx.message.text.trim();
         if (!link.includes('t.me/')) {
             await ctx.reply('Invalid link. Must contain t.me/');
@@ -187,6 +247,10 @@ const botStartScene = new WizardScene(
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const qty = parseInt(ctx.message.text);
         if (isNaN(qty) || qty < 1 || qty > 10) {
             await ctx.reply('Enter a number between 1 and 10.');
@@ -213,10 +277,18 @@ const botStartScene = new WizardScene(
 const channelScene = new WizardScene(
     'channel',
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Please try again later.');
+            return ctx.scene.leave();
+        }
         await ctx.reply('⚠️ Warning: The bot must be admin in the channel to verify members.\n\nSend channel link (e.g., https://t.me/ChannelName)');
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const link = ctx.message.text.trim();
         if (!link.includes('t.me/')) {
             await ctx.reply('Invalid link. Must contain t.me/');
@@ -227,6 +299,10 @@ const channelScene = new WizardScene(
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const qty = parseInt(ctx.message.text);
         if (isNaN(qty) || qty < 1 || qty > 10) {
             await ctx.reply('Enter a number between 1 and 10.');
@@ -253,10 +329,18 @@ const channelScene = new WizardScene(
 const groupScene = new WizardScene(
     'group',
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Please try again later.');
+            return ctx.scene.leave();
+        }
         await ctx.reply('⚠️ Warning: The bot must be admin in the group to verify members.\n\nSend group invite link or username (e.g., https://t.me/GroupName)');
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const link = ctx.message.text.trim();
         if (!link.includes('t.me/')) {
             await ctx.reply('Invalid link. Must contain t.me/');
@@ -267,6 +351,10 @@ const groupScene = new WizardScene(
         return ctx.wizard.next();
     },
     async (ctx) => {
+        if (isPaymentPaused()) {
+            await ctx.reply('🛑 Purchases are paused. Operation cancelled.');
+            return ctx.scene.leave();
+        }
         const qty = parseInt(ctx.message.text);
         if (isNaN(qty) || qty < 1 || qty > 10) {
             await ctx.reply('Enter a number between 1 and 10.');
@@ -360,7 +448,6 @@ bot.hears('🔙Back', async (ctx) => {
 
 // ==================== ADMIN COMMANDS ====================
 
-// Check balance
 bot.command('checkbalance', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const args = ctx.message.text.split(' ');
@@ -377,7 +464,6 @@ bot.command('checkbalance', async (ctx) => {
     await ctx.reply(`User ${userId} has ${balance} Birr.`);
 });
 
-// Add balance
 bot.command('addbalance', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const args = ctx.message.text.split(' ');
@@ -395,7 +481,6 @@ bot.command('addbalance', async (ctx) => {
     await ctx.reply(`Added ${amount} Birr to user ${userId}. New balance: ${newBalance}`);
 });
 
-// Deduct balance
 bot.command('deductbalance', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const args = ctx.message.text.split(' ');
@@ -418,7 +503,6 @@ bot.command('deductbalance', async (ctx) => {
     await ctx.reply(`Deducted ${amount} Birr from user ${userId}. New balance: ${newBalance}`);
 });
 
-// Set balance
 bot.command('setbalance', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const args = ctx.message.text.split(' ');
@@ -436,11 +520,38 @@ bot.command('setbalance', async (ctx) => {
     await ctx.reply(`Balance for user ${userId} set to ${amount} Birr.`);
 });
 
+// ===== NEW: Toggle payment pause =====
+bot.command('togglepayments', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const newStatus = togglePaymentPaused();
+    const statusText = newStatus ? '🛑 PAUSED' : '✅ ACTIVE';
+    await ctx.reply(`Payment status changed to: ${statusText}`);
+});
+
+bot.command('paymentstatus', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const paused = isPaymentPaused();
+    const statusText = paused ? '🛑 PAUSED' : '✅ ACTIVE';
+    await ctx.reply(`Current payment status: ${statusText}`);
+});
+
 // ==================== REGISTER SCENES ====================
 const stage = new Stage([depositScene, withdrawScene, botStartScene, channelScene, groupScene, earnScene]);
 bot.use(stage.middleware());
 
-// ==================== LAUNCH ====================
-bot.launch().then(() => console.log('Bot started (Telebirr deposit version).'));
+// ==================== EXPRESS SERVER (for Render) ====================
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+    res.send('Bot is running.');
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Web server listening on port ${PORT}`);
+});
+
+// ==================== LAUNCH BOT ====================
+bot.launch().then(() => console.log('🤖 Bot started (Telebirr deposit version).'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
