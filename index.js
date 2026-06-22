@@ -1,17 +1,53 @@
 const { Telegraf, session, Markup, Scenes } = require('telegraf');
-const express = require('express');
-const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 // ==================== CONFIG ====================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN environment variable missing.');
 
-// ⚠️ CHANGE THIS TO YOUR OWN TELEGRAM USER ID
-const ADMIN_ID = 6596414316;  // <--- replace with your numeric ID
+// ⚠️ CHANGE THIS TO YOUR TELEGRAM USER ID
+const ADMIN_ID = 6596414316; // <-- replace with your numeric ID
 
-// Chapa keys (hardcoded – replace with your own if needed)
-const CHAPA_SECRET = 'CHASECK-X336iOa0QhxUCUOdUeq8g3X6JpgwFLn2';
-const CHAPA_PUBLIC = 'CHAPUBK-VEVdXIbNH7NduotligB37ahBxZEhuBxE';
+const TELEBIRR_NUMBER = '0986179505'; // Telebirr number to send payment to
+
+// ==================== BALANCE STORAGE (JSON file) ====================
+const BALANCE_FILE = path.join(__dirname, 'balances.json');
+
+function loadBalances() {
+    if (!fs.existsSync(BALANCE_FILE)) {
+        fs.writeFileSync(BALANCE_FILE, JSON.stringify({}));
+        return {};
+    }
+    try {
+        const data = fs.readFileSync(BALANCE_FILE, 'utf8');
+        return JSON.parse(data);
+    } catch {
+        return {};
+    }
+}
+
+function saveBalances(balances) {
+    fs.writeFileSync(BALANCE_FILE, JSON.stringify(balances, null, 2));
+}
+
+function getBalance(userId) {
+    const balances = loadBalances();
+    return balances[userId] || 0;
+}
+
+function setBalance(userId, amount) {
+    const balances = loadBalances();
+    balances[userId] = Math.round(amount * 100) / 100;
+    saveBalances(balances);
+}
+
+function addBalance(userId, amount) {
+    const current = getBalance(userId);
+    const newBalance = current + amount;
+    setBalance(userId, newBalance);
+    return newBalance;
+}
 
 // ==================== BOT SETUP ====================
 const bot = new Telegraf(BOT_TOKEN);
@@ -35,30 +71,10 @@ function convertBotLink(link) {
     return match ? `${match[1]}?start=${match[2]}` : link;
 }
 
-// ==================== CHAPA PAYMENT (generate link) ====================
-async function createChapaPayment(amount, email, txRef) {
-    const url = 'https://api.chapa.co/v1/transaction/initialize';
-    const headers = {
-        'Authorization': `Bearer ${CHAPA_SECRET}`,
-        'Content-Type': 'application/json'
-    };
-    const payload = {
-        amount,
-        currency: 'ETB',
-        email,
-        tx_ref: txRef,
-        callback_url: 'https://yourdomain.com/webhook/chapa',
-        return_url: `https://t.me/${process.env.BOT_USERNAME || 'YourBot'}`,
-        customization: { title: 'Wallet Deposit' }
-    };
-    const response = await axios.post(url, payload, { headers });
-    return response.data;
-}
-
 // ==================== SCENES ====================
 const { Stage, WizardScene } = Scenes;
 
-// ---------- Deposit Scene ----------
+// ---------- Deposit Scene (Telebirr manual) ----------
 const depositScene = new WizardScene(
     'deposit',
     async (ctx) => {
@@ -71,28 +87,37 @@ const depositScene = new WizardScene(
             await ctx.reply('Please enter a valid positive number.');
             return;
         }
-        const userId = ctx.from.id;
-        const txRef = `dep_${userId}_${Date.now()}`;
-        try {
-            const result = await createChapaPayment(amount, `${userId}@example.com`, txRef);
-            if (result.status === 'success' && result.data && result.data.checkout_url) {
-                // Send payment link to user
-                await ctx.reply(
-                    `💰 Deposit link:\n${result.data.checkout_url}\n\nAfter payment, please send a screenshot to admin for manual credit.`
-                );
-                // Forward deposit request to admin
-                await ctx.telegram.sendMessage(
-                    ADMIN_ID,
-                    `📥 Deposit Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nAmount: ${amount} Birr\nTxRef: ${txRef}\nPayment link: ${result.data.checkout_url}`
-                );
-            } else {
-                await ctx.reply('Payment initialization failed. Try again later.');
-            }
-        } catch (error) {
-            console.error('Chapa error:', error);
-            await ctx.reply('Payment service error.');
+        ctx.wizard.state.amount = amount;
+        // Show payment instructions
+        await ctx.reply(
+            `💳 Please send exactly **${amount} Birr** to Telebirr number:\n` +
+            `\`${TELEBIRR_NUMBER}\`\n\n` +
+            `After sending, take a screenshot of the payment confirmation and send it here.\n` +
+            `📸 Send the screenshot as a photo.`
+        );
+        await ctx.reply('📤 Send the screenshot now.');
+        return ctx.wizard.next();
+    },
+    async (ctx) => {
+        // This step receives the photo
+        const photo = ctx.message.photo;
+        if (!photo) {
+            await ctx.reply('Please send a photo (screenshot) of your payment confirmation.');
+            return;
         }
-        await ctx.reply('Returning to wallet.', walletKeyboard);
+        const userId = ctx.from.id;
+        const amount = ctx.wizard.state.amount;
+        // Forward the photo to admin with user details
+        const caption =
+            `📥 Deposit Screenshot\n` +
+            `User: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\n` +
+            `Amount: ${amount} Birr\n` +
+            `Please verify and credit balance using /addbalance ${userId} ${amount}`;
+        await ctx.telegram.sendPhoto(ADMIN_ID, photo[photo.length - 1].file_id, { caption });
+        await ctx.reply(
+            `✅ Screenshot sent to admin. Your deposit will be verified and credited shortly.`,
+            walletKeyboard
+        );
         return ctx.scene.leave();
     }
 );
@@ -110,6 +135,12 @@ const withdrawScene = new WizardScene(
             await ctx.reply('Amount must be between 5 and 25. Try again.');
             return;
         }
+        const userId = ctx.from.id;
+        const balance = getBalance(userId);
+        if (balance < amount + 1) {
+            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${amount + 1} (amount + fee).`);
+            return ctx.scene.leave();
+        }
         ctx.wizard.state.amount = amount;
         await ctx.reply('Enter your Telebirr phone number (09XXXXXXXX):');
         return ctx.wizard.next();
@@ -122,15 +153,15 @@ const withdrawScene = new WizardScene(
         }
         const userId = ctx.from.id;
         const { amount } = ctx.wizard.state;
-        const netAmount = amount - 1; // fee = 1 Birr
-
-        // Forward withdrawal request to admin
+        const netAmount = amount - 1;
+        // Deduct balance
+        const newBalance = addBalance(userId, -(amount + 1));
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `📤 Withdrawal Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nAmount: ${amount} Birr\nNet: ${netAmount} Birr\nPhone: ${phone}`
+            `📤 Withdrawal Request\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nAmount: ${amount} Birr\nNet: ${netAmount} Birr\nPhone: ${phone}\nNew balance: ${newBalance}`
         );
         await ctx.reply(
-            `✅ Withdrawal request sent to admin.\nYou will receive ${netAmount} Birr within 24‑48 hours after approval.`,
+            `✅ Withdrawal request sent. You will receive ${netAmount} Birr within 24‑48 hours after admin approval.`,
             walletKeyboard
         );
         return ctx.scene.leave();
@@ -162,14 +193,18 @@ const botStartScene = new WizardScene(
             return;
         }
         const userId = ctx.from.id;
-        const totalCost = qty * 1; // 1 Birr per start
-
-        // Forward order to admin
+        const totalCost = qty * 1;
+        const balance = getBalance(userId);
+        if (balance < totalCost) {
+            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${totalCost}.`);
+            return ctx.scene.leave();
+        }
+        addBalance(userId, -totalCost);
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `🤖 Bot Start Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nBot link: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr`
+            `🤖 Bot Start Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nBot link: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr\nRemaining balance: ${getBalance(userId)}`
         );
-        await ctx.reply(`✅ Order submitted to admin. You will be notified when processed.`);
+        await ctx.reply(`✅ Order submitted. ${totalCost} Birr deducted. You will be notified when processed.`);
         return ctx.scene.leave();
     }
 );
@@ -198,13 +233,18 @@ const channelScene = new WizardScene(
             return;
         }
         const userId = ctx.from.id;
-        const totalCost = qty * 1; // 1 Birr per member
-
+        const totalCost = qty * 1;
+        const balance = getBalance(userId);
+        if (balance < totalCost) {
+            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${totalCost}.`);
+            return ctx.scene.leave();
+        }
+        addBalance(userId, -totalCost);
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `📢 Channel Subscribe Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nChannel: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr`
+            `📢 Channel Subscribe Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nChannel: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr\nRemaining balance: ${getBalance(userId)}`
         );
-        await ctx.reply(`✅ Order submitted to admin. You will be notified when processed.`);
+        await ctx.reply(`✅ Order submitted. ${totalCost} Birr deducted. You will be notified when processed.`);
         return ctx.scene.leave();
     }
 );
@@ -234,17 +274,22 @@ const groupScene = new WizardScene(
         }
         const userId = ctx.from.id;
         const totalCost = qty * 1;
-
+        const balance = getBalance(userId);
+        if (balance < totalCost) {
+            await ctx.reply(`Insufficient balance. You have ${balance} Birr, need ${totalCost}.`);
+            return ctx.scene.leave();
+        }
+        addBalance(userId, -totalCost);
         await ctx.telegram.sendMessage(
             ADMIN_ID,
-            `👑 Group Join Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nGroup: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr`
+            `👑 Group Join Order\nUser: ${userId} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})\nGroup: ${ctx.wizard.state.link}\nQuantity: ${qty}\nTotal cost: ${totalCost} Birr\nRemaining balance: ${getBalance(userId)}`
         );
-        await ctx.reply(`✅ Order submitted to admin. You will be notified when processed.`);
+        await ctx.reply(`✅ Order submitted. ${totalCost} Birr deducted. You will be notified when processed.`);
         return ctx.scene.leave();
     }
 );
 
-// ---------- Earn Scene (forward request) ----------
+// ---------- Earn Scene ----------
 const earnScene = new WizardScene(
     'earn',
     async (ctx) => {
@@ -258,12 +303,11 @@ const earnScene = new WizardScene(
         return ctx.wizard.next();
     },
     async (ctx) => {
-        // This step is not used; the callback handles it.
+        // unused
         return;
     }
 );
 
-// Handle callback for requesting tasks
 bot.action('request_tasks', async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id;
@@ -282,12 +326,8 @@ bot.start(async (ctx) => {
 });
 
 bot.hears('💰Wallet', async (ctx) => {
-    await ctx.reply('Your balance is managed by admin. Use /balance to request your current balance from admin.');
-    // Optionally forward balance request to admin
-    await ctx.telegram.sendMessage(
-        ADMIN_ID,
-        `💰 Balance Request\nUser: ${ctx.from.id} (${ctx.from.first_name || ''} ${ctx.from.last_name || ''})`
-    );
+    const balance = getBalance(ctx.from.id);
+    await ctx.reply(`Your balance: ${balance} Birr`, walletKeyboard);
 });
 
 bot.hears('🤖Get Bot Start', async (ctx) => {
@@ -318,12 +358,89 @@ bot.hears('🔙Back', async (ctx) => {
     await ctx.reply('Main menu', mainKeyboard);
 });
 
+// ==================== ADMIN COMMANDS ====================
+
+// Check balance
+bot.command('checkbalance', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        await ctx.reply('Usage: /checkbalance <user_id>');
+        return;
+    }
+    const userId = parseInt(args[1]);
+    if (isNaN(userId)) {
+        await ctx.reply('Invalid user ID.');
+        return;
+    }
+    const balance = getBalance(userId);
+    await ctx.reply(`User ${userId} has ${balance} Birr.`);
+});
+
+// Add balance
+bot.command('addbalance', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const args = ctx.message.text.split(' ');
+    if (args.length < 3) {
+        await ctx.reply('Usage: /addbalance <user_id> <amount>');
+        return;
+    }
+    const userId = parseInt(args[1]);
+    const amount = parseFloat(args[2]);
+    if (isNaN(userId) || isNaN(amount) || amount <= 0) {
+        await ctx.reply('Invalid user ID or amount.');
+        return;
+    }
+    const newBalance = addBalance(userId, amount);
+    await ctx.reply(`Added ${amount} Birr to user ${userId}. New balance: ${newBalance}`);
+});
+
+// Deduct balance
+bot.command('deductbalance', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const args = ctx.message.text.split(' ');
+    if (args.length < 3) {
+        await ctx.reply('Usage: /deductbalance <user_id> <amount>');
+        return;
+    }
+    const userId = parseInt(args[1]);
+    const amount = parseFloat(args[2]);
+    if (isNaN(userId) || isNaN(amount) || amount <= 0) {
+        await ctx.reply('Invalid user ID or amount.');
+        return;
+    }
+    const balance = getBalance(userId);
+    if (balance < amount) {
+        await ctx.reply(`User ${userId} only has ${balance} Birr. Cannot deduct ${amount}.`);
+        return;
+    }
+    const newBalance = addBalance(userId, -amount);
+    await ctx.reply(`Deducted ${amount} Birr from user ${userId}. New balance: ${newBalance}`);
+});
+
+// Set balance
+bot.command('setbalance', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return;
+    const args = ctx.message.text.split(' ');
+    if (args.length < 3) {
+        await ctx.reply('Usage: /setbalance <user_id> <amount>');
+        return;
+    }
+    const userId = parseInt(args[1]);
+    const amount = parseFloat(args[2]);
+    if (isNaN(userId) || isNaN(amount) || amount < 0) {
+        await ctx.reply('Invalid user ID or amount (must be >= 0).');
+        return;
+    }
+    setBalance(userId, amount);
+    await ctx.reply(`Balance for user ${userId} set to ${amount} Birr.`);
+});
+
 // ==================== REGISTER SCENES ====================
 const stage = new Stage([depositScene, withdrawScene, botStartScene, channelScene, groupScene, earnScene]);
 bot.use(stage.middleware());
 
 // ==================== LAUNCH ====================
-bot.launch().then(() => console.log('Bot started (database‑free mode).'));
-
+bot.launch().then(() => console.log('Bot started (Telebirr deposit version).'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
