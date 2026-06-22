@@ -1,5 +1,5 @@
 {
-  "name": "sniads-earn-bot",
+  "name": "Ace Earn",
   "version": "1.0.0",
   "description": "Telegram advertising bot – admin relay mode, no database",
   "main": "index.js",
