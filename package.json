@@ -1,17 +1,16 @@
 {
-  "name": "Ace Earn",
+  "name": "telegram-earn-bot",
   "version": "1.0.0",
-  "description": "Telegram advertising bot – admin relay mode, no database",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "telegraf": "^4.16.3",
-    "express": "^4.21.2",
-    "axios": "^1.6.2"
+    "node-telegram-bot-api": "^0.64.0",
+    "express": "^4.18.2",
+    "body-parser": "^1.20.2"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   }
 }
