@@ -440,7 +440,7 @@ def payment_success():
       <p>Return to D² Ai app.</p></body></html>"""
 
 # ═══════════════════════════════════════════════════
-#  PLAYLIST / CHAPTER / VIDEO (from Telegram captions)
+#  PLAYLIST / CHAPTER / VIDEO
 # ═══════════════════════════════════════════════════
 
 def parse_caption(caption):
@@ -633,29 +633,6 @@ def admin_users():
         })
     return jsonify(out)
 
-@app.route("/admin/users/search")
-@require_admin
-def admin_search_users():
-    q = request.args.get("q", "").strip().lower()
-    if not q:
-        return jsonify([])
-    results = []
-    for u in USERS.values():
-        phone  = (u.get("phone") or "").lower()
-        name   = (u.get("name") or "").lower()
-        device = (u.get("device_name") or "").lower()
-        if q in phone or q in name or q in device:
-            results.append({
-                "phone": u["phone"],
-                "name": u.get("name"),
-                "device_name": u.get("device_name"),
-                "is_active": u.get("is_active", True),
-                "last_login": u.get("last_login"),
-                "payment": u.get("payment", {}),
-                "state": _user_subscription_state(u),
-            })
-    return jsonify(results[:100])
-
 @app.route("/admin/user/<phone>/payment", methods=["GET"])
 @require_admin
 def admin_get_user_payment(phone):
@@ -763,14 +740,9 @@ def admin_update_settings():
 def admin_structure():
     return jsonify(build_structure())
 
-# ═══════════════════════════════════════════════════
-#  ADMIN VIDEO MANAGEMENT (NEW)
-# ═══════════════════════════════════════════════════
-
 @app.route("/admin/video/<int:msg_id>", methods=["POST"])
 @require_admin
 def admin_edit_video(msg_id):
-    """Edit video caption = change playlist|chapter|title."""
     data = request.get_json() or {}
     playlist = (data.get("playlist") or "").strip()
     chapter  = (data.get("chapter") or "").strip()
@@ -794,7 +766,6 @@ def admin_edit_video(msg_id):
 @app.route("/admin/video/<int:msg_id>", methods=["DELETE"])
 @require_admin
 def admin_delete_video(msg_id):
-    """Delete video from Telegram channel."""
     try:
         run(client.delete_messages(CHANNEL, [msg_id]))
     except Exception as e:
@@ -839,6 +810,7 @@ ADMIN_HTML = """
   .video-info { flex:1; }
   .video-info b { color:#1976d2; }
   .badge { display:inline-block; background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:10px; font-size:11px; margin-right:4px; }
+  .hidden { display:none !important; }
 </style>
 </head>
 <body>
@@ -847,53 +819,60 @@ ADMIN_HTML = """
 
   <div class="card">
     <h2>🔑 Admin Key</h2>
-    <input type="password" id="adminKey" placeholder="Enter admin key">
+    <input type="password" id="adminKey" placeholder="Enter admin key and press Enter">
+    <div class="status">Enter the admin key then press <b>Enter</b> or click <b>Load Panel</b>.</div>
+    <button onclick="loadAll()">Load Panel</button>
+    <div class="status" id="keyStatus"></div>
   </div>
 
-  <div class="card">
-    <h2>⚙️ Global Settings</h2>
-    <label><input type="checkbox" id="paymentsGlobal"> Enable payments globally (master switch)</label>
-    <label>Default Price (ETB)</label>
-    <input type="number" id="defPrice" value="100">
-    <label>Default Period (days)</label>
-    <input type="number" id="defPeriod" value="30">
-    <label>Default Trial (days)</label>
-    <input type="number" id="defTrial" value="3">
-    <button onclick="saveSettings()">Save Settings</button>
-    <div class="status" id="settingsStatus"></div>
-  </div>
+  <div id="panel" class="hidden">
 
-  <div class="card">
-    <h2>📤 How to Upload Videos</h2>
-    <div class="hint">
-      <b>Upload videos directly in Telegram</b> (not here):<br>
-      1. Open your Telegram channel<br>
-      2. Send video with caption: <code>playlist|chapter|title</code><br>
-      3. Example: <code>GRADE 11 MATHS|ALGEBRA|SOLVING</code><br>
-      4. Refresh below to see it.
+    <div class="card">
+      <h2>⚙️ Global Settings</h2>
+      <label><input type="checkbox" id="paymentsGlobal"> Enable payments globally (master switch)</label>
+      <label>Default Price (ETB)</label>
+      <input type="number" id="defPrice" value="100">
+      <label>Default Period (days)</label>
+      <input type="number" id="defPeriod" value="30">
+      <label>Default Trial (days)</label>
+      <input type="number" id="defTrial" value="3">
+      <button onclick="saveSettings()">Save Settings</button>
+      <div class="status" id="settingsStatus"></div>
     </div>
-  </div>
 
-  <div class="card">
-    <h2>📚 Videos Management</h2>
-    <button onclick="loadVideos()">Refresh Videos</button>
-    <div id="videos" style="margin-top:12px"></div>
-  </div>
+    <div class="card">
+      <h2>📤 How to Upload Videos</h2>
+      <div class="hint">
+        <b>Upload videos directly in Telegram</b> (not here):<br>
+        1. Open your Telegram channel<br>
+        2. Send video with caption: <code>playlist|chapter|title</code><br>
+        3. Example: <code>GRADE 11 MATHS|ALGEBRA|SOLVING</code><br>
+        4. Click <b>Refresh Videos</b> below to see it.
+      </div>
+    </div>
 
-  <div class="card">
-    <h2>👥 Users</h2>
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <input type="text" id="userSearch" placeholder="🔍 Search phone, name, device..." oninput="filterUsers()">
-      <button onclick="loadUsers()" style="margin-top:0">Refresh</button>
-      <button onclick="clearSearch()" style="margin-top:0;background:#888">Clear</button>
+    <div class="card">
+      <h2>📚 Videos Management</h2>
+      <button onclick="loadVideos()">Refresh Videos</button>
+      <div id="videos" style="margin-top:12px"></div>
     </div>
-    <div style="font-size:12px;color:#666;margin:8px 0" id="userCount">0 users</div>
-    <div style="overflow-x:auto">
-      <table id="usersTable">
-        <thead><tr><th>Phone</th><th>Name</th><th>Device</th><th>Payment</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody></tbody>
-      </table>
+
+    <div class="card">
+      <h2>👥 Users</h2>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <input type="text" id="userSearch" placeholder="🔍 Search phone, name, device..." oninput="filterUsers()">
+        <button onclick="loadUsers()" style="margin-top:0">Refresh</button>
+        <button onclick="clearSearch()" style="margin-top:0;background:#888">Clear</button>
+      </div>
+      <div style="font-size:12px;color:#666;margin:8px 0" id="userCount">0 users</div>
+      <div style="overflow-x:auto">
+        <table id="usersTable">
+          <thead><tr><th>Phone</th><th>Name</th><th>Device</th><th>Payment</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
+
   </div>
 
 </div>
@@ -940,16 +919,52 @@ ADMIN_HTML = """
 const $ = id => document.getElementById(id);
 $('adminKey').value = localStorage.getItem('adminKey') || '';
 $('adminKey').onchange = () => localStorage.setItem('adminKey', $('adminKey').value);
+$('adminKey').onkeydown = (e) => { if (e.key === 'Enter') loadAll(); };
 const key = () => $('adminKey').value;
 
-async function loadSettings() {
-  const r = await fetch('/admin/settings', { headers: { 'X-Admin-Key': key() } });
-  if (!r.ok) return;
-  const s = await r.json();
-  $('paymentsGlobal').checked = s.payments_enabled_globally;
-  $('defPrice').value = s.default_price_etb;
-  $('defPeriod').value = s.default_period_days;
-  $('defTrial').value = s.default_trial_days;
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadAll() {
+  if (!key()) {
+    $('keyStatus').className = 'status error';
+    $('keyStatus').textContent = '❌ Enter an admin key first';
+    return;
+  }
+  localStorage.setItem('adminKey', key());
+
+  // Test the key with a lightweight call
+  try {
+    const r = await fetch('/admin/settings', { headers: { 'X-Admin-Key': key() } });
+    if (r.status === 401) {
+      $('keyStatus').className = 'status error';
+      $('keyStatus').textContent = '❌ Unauthorized — wrong admin key';
+      $('panel').classList.add('hidden');
+      return;
+    }
+    if (!r.ok) {
+      $('keyStatus').className = 'status error';
+      $('keyStatus').textContent = '❌ Server error: ' + r.status;
+      return;
+    }
+    const s = await r.json();
+    $('paymentsGlobal').checked = s.payments_enabled_globally;
+    $('defPrice').value = s.default_price_etb;
+    $('defPeriod').value = s.default_period_days;
+    $('defTrial').value = s.default_trial_days;
+
+    $('keyStatus').className = 'status success';
+    $('keyStatus').textContent = '✅ Loaded';
+    $('panel').classList.remove('hidden');
+
+    // Load the rest
+    loadVideos();
+    loadUsers();
+  } catch (e) {
+    $('keyStatus').className = 'status error';
+    $('keyStatus').textContent = '❌ ' + e;
+  }
 }
 
 async function saveSettings() {
@@ -968,18 +983,17 @@ async function saveSettings() {
   $('settingsStatus').textContent = r.ok ? '✅ Saved' : '❌ Failed';
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
 // ── VIDEOS ──
 let allVideos = [];
 async function loadVideos() {
+  $('videos').innerHTML = '<i>Loading…</i>';
   const r = await fetch('/admin/structure', { headers: { 'X-Admin-Key': key() } });
-  if (!r.ok) { $('videos').innerHTML = '<i>Unauthorized</i>'; return; }
+  if (!r.ok) {
+    $('videos').innerHTML = '<i>❌ Failed to load (' + r.status + ')</i>';
+    return;
+  }
   const playlists = await r.json();
 
-  // Flatten for easier display
   allVideos = [];
   playlists.forEach(p => {
     p.chapters.forEach(c => {
@@ -997,7 +1011,7 @@ async function loadVideos() {
   });
 
   if (allVideos.length === 0) {
-    $('videos').innerHTML = '<i>No videos yet. Upload via Telegram first.</i>';
+    $('videos').innerHTML = '<i>No videos yet. Upload via Telegram first, then refresh.</i>';
     return;
   }
 
@@ -1073,7 +1087,7 @@ async function deleteVideo(id) {
 let allUsers = [];
 async function loadUsers() {
   const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
-  if (!r.ok) return alert('Unauthorized');
+  if (!r.ok) return;
   allUsers = await r.json();
   renderUsers(allUsers);
 }
@@ -1191,8 +1205,8 @@ document.addEventListener('keydown', e => {
   }
 });
 
-loadSettings();
-loadVideos();
+// Auto-load if key is already saved
+if (key()) loadAll();
 </script>
 </body>
 </html>
