@@ -27,14 +27,12 @@ SETTINGS_MSG_MARKER = "D2AI_SETTINGS_v1"
 
 app = Flask(__name__)
 CORS(app)
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2GB
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024
 
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
 
 def run(coro):
-    return loop.run_until_complete(coro)
+    return client.loop.run_until_complete(coro)
 
 def hash_password(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
@@ -433,7 +431,6 @@ def payment_webhook():
 
 @app.route("/verify", methods=["POST"])
 def chapa_verify_alias():
-    """Alias for Chapa dashboard webhook field."""
     return _handle_payment_webhook()
 
 @app.route("/payment/success")
@@ -1123,11 +1120,11 @@ def admin_page():
     return render_template_string(ADMIN_HTML)
 
 # ═══════════════════════════════════════════════════
-#  STARTUP (runs at module load — no decorator)
+#  STARTUP (runs at module load)
 # ═══════════════════════════════════════════════════
 print("🚀 Starting server...")
 try:
-    run(client.start())
+    client.start()
     load_users()
     load_settings()
     print("✅ Server ready")
