@@ -423,3 +423,288 @@ def payment_success():
       <h1>✅ Payment received</h1>
       <p>Reference: <code>{tx_ref}</code></p>
       <p>Return to D² Ai app.</p></body></html>"""
+def parse_caption(caption):
+    if not caption:
+        return None
+    parts = [p.strip() for p in caption.split("|", 2)]
+    if len(parts) == 3:
+        return {"playlist": parts[0], "chapter": parts[1], "title": parts[2]}
+    return {"playlist": "General", "chapter": "Uncategorized", "title": caption}
+
+def build_structure():
+    msgs = run(client.get_messages(CHANNEL, limit=1000))
+    playlists = {}
+    for m in msgs:
+        if not m.video:
+            continue
+        if m.message and (m.message.startswith(USERS_MSG_MARKER)
+                          or m.message.startswith(SETTINGS_MSG_MARKER)):
+            continue
+        meta = parse_caption(m.message or "")
+        if not meta:
+            continue
+        pl = meta["playlist"]
+        ch = meta["chapter"]
+        playlists.setdefault(pl, {"title": pl, "chapters": {}})
+        playlists[pl]["chapters"].setdefault(ch, {"title": ch, "videos": []})
+        playlists[pl]["chapters"][ch]["videos"].append({
+            "id": m.id, "tg_msg_id": m.id, "title": meta["title"],
+            "playlist": pl, "chapter": ch,
+            "duration": m.video.duration or 0,
+            "size": m.video.size or 0,
+            "stream_url": f"/stream/{m.id}",
+            "download_url": f"/download/{m.id}",
+            "thumb_url": f"/thumb/{m.id}",
+        })
+    result = []
+    for pl in playlists.values():
+        pl["chapters"] = list(pl["chapters"].values())
+        for c in pl["chapters"]:
+            c["videos"].sort(key=lambda v: v["tg_msg_id"])
+        pl["chapter_count"] = len(pl["chapters"])
+        result.append(pl)
+    return result
+
+@app.route("/api/playlists")
+@require_auth
+def api_playlists():
+    return jsonify([{"title": p["title"], "chapter_count": p["chapter_count"]} for p in build_structure()])
+
+@app.route("/api/playlist/<string:name>")
+@require_auth
+@_require_active_subscription
+def api_playlist(name):
+    for p in build_structure():
+        if p["title"] == name:
+            return jsonify({
+                "title": p["title"],
+                "chapters": [{"title": c["title"], "video_count": len(c["videos"])} for c in p["chapters"]],
+            })
+    return jsonify({"error": "not found"}), 404
+
+@app.route("/api/playlist/<string:pl_name>/chapter/<string:ch_name>")
+@require_auth
+@_require_active_subscription
+def api_chapter(pl_name, ch_name):
+    for p in build_structure():
+        if p["title"] == pl_name:
+            for c in p["chapters"]:
+                if c["title"] == ch_name:
+                    return jsonify({"playlist": pl_name, "chapter": ch_name, "videos": c["videos"]})
+    return jsonify({"error": "not found"}), 404
+
+@app.route("/stream/<int:message_id>")
+@require_auth
+@_require_active_subscription
+def stream(message_id):
+    msg = run(client.get_messages(CHANNEL, ids=message_id))
+    if not msg or not msg.video:
+        return "Not found", 404
+    file_size = msg.video.size
+    mime = msg.video.mime_type or "video/mp4"
+    range_header = request.headers.get("Range")
+    start, end, status = 0, file_size - 1, 200
+    if range_header:
+        units, _, rng = range_header.partition("=")
+        if units.strip() == "bytes":
+            s, _, e = rng.partition("-")
+            start = int(s) if s else 0
+            end = int(e) if e else file_size - 1
+            end = min(end, file_size - 1)
+            status = 206
+    length = end - start + 1
+    def generate():
+        buf = io.BytesIO()
+        run(client.download_media(msg, file=buf, offset=start, limit=length))
+        buf.seek(0)
+        chunk = 256 * 1024
+        while True:
+            data = buf.read(chunk)
+            if not data:
+                break
+            yield data
+    return Response(generate(), status=status, headers={
+        "Content-Type": mime, "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Cache-Control": "public, max-age=3600",
+    })
+
+@app.route("/download/<int:message_id>")
+@require_auth
+@_require_active_subscription
+def download(message_id):
+    msg = run(client.get_messages(CHANNEL, ids=message_id))
+    if not msg or not msg.video:
+        return "Not found", 404
+    file_size = msg.video.size
+    mime = msg.video.mime_type or "video/mp4"
+    def generate():
+        buf = io.BytesIO()
+        run(client.download_media(msg, file=buf))
+        buf.seek(0)
+        chunk = 512 * 1024
+        while True:
+            data = buf.read(chunk)
+            if not data:
+                break
+            yield data
+    return Response(generate(), headers={
+        "Content-Type": mime, "Content-Length": str(file_size),
+        "Content-Disposition": f'attachment; filename="{message_id}.mp4"',
+        "Accept-Ranges": "bytes",
+    })
+
+@app.route("/thumb/<int:message_id>")
+@require_auth
+def thumb(message_id):
+    msg = run(client.get_messages(CHANNEL, ids=message_id))
+    if not msg or not msg.video or not msg.video.thumbs:
+        return "", 404
+    buf = io.BytesIO()
+    run(client.download_media(msg, file=buf, thumb=-1))
+    buf.seek(0)
+    return Response(buf.read(), mimetype="image/jpeg")
+
+@app.route("/admin/users")
+@require_admin
+def admin_users():
+    out = []
+    for u in USERS.values():
+        out.append({
+            "phone": u["phone"], "name": u.get("name"),
+            "device_name": u.get("device_name"),
+            "is_active": u.get("is_active", True),
+            "last_login": u.get("last_login"),
+            "payment": u.get("payment", {}),
+            "state": _user_subscription_state(u),
+        })
+    return jsonify(out)
+
+@app.route("/admin/user/<phone>/payment", methods=["GET"])
+@require_admin
+def admin_get_user_payment(phone):
+    user = USERS.get(phone)
+    if not user:
+        return jsonify({"error": "user not found"}), 404
+    return jsonify({"phone": phone, "name": user.get("name"), "payment": user.get("payment", {}), "state": _user_subscription_state(user)})
+
+@app.route("/admin/user/<phone>/payment", methods=["POST"])
+@require_admin
+def admin_update_user_payment(phone):
+    user = USERS.get(phone)
+    if not user:
+        return jsonify({"error": "user not found"}), 404
+    data = request.get_json() or {}
+    pay = user.setdefault("payment", {})
+    if "mode" in data and data["mode"] in ("free", "trial", "paid"):
+        pay["mode"] = data["mode"]
+    if "price_etb" in data:
+        pay["price_etb"] = int(data["price_etb"])
+    if "period_days" in data:
+        pay["period_days"] = int(data["period_days"])
+    if "note" in data:
+        pay["note"] = str(data["note"])
+    if "extend_days" in data:
+        days = int(data["extend_days"])
+        now = datetime.utcnow()
+        base = now
+        until_str = pay.get("until")
+        if until_str:
+            try:
+                prev = datetime.fromisoformat(until_str)
+                if prev > now:
+                    base = prev
+            except Exception:
+                pass
+        pay["until"] = (base + timedelta(days=days)).isoformat()
+        pay["status"] = "active"
+        pay["mode"] = "paid"
+    if data.get("force_expire"):
+        pay["until"] = datetime.utcnow().isoformat()
+        pay["status"] = "expired"
+    save_users()
+    return jsonify({"ok": True, "payment": pay, "state": _user_subscription_state(user)})
+
+@app.route("/admin/reset-device/<phone>", methods=["POST"])
+@require_admin
+def admin_reset_device(phone):
+    user = USERS.get(phone)
+    if not user:
+        return jsonify({"error": "user not found"}), 404
+    user["device_id"] = None
+    user["device_name"] = None
+    save_users()
+    for tok in [t for t, s in SESSIONS.items() if s["phone"] == phone]:
+        SESSIONS.pop(tok, None)
+    return jsonify({"ok": True})
+
+@app.route("/admin/toggle-user/<phone>", methods=["POST"])
+@require_admin
+def admin_toggle_user(phone):
+    user = USERS.get(phone)
+    if not user:
+        return jsonify({"error": "user not found"}), 404
+    user["is_active"] = not user.get("is_active", True)
+    save_users()
+    return jsonify({"ok": True, "is_active": user["is_active"]})
+
+@app.route("/admin/delete-user/<phone>", methods=["POST"])
+@require_admin
+def admin_delete_user(phone):
+    USERS.pop(phone, None)
+    save_users()
+    return jsonify({"ok": True})
+
+@app.route("/admin/settings", methods=["GET"])
+@require_admin
+def admin_get_settings():
+    return jsonify(SETTINGS)
+
+@app.route("/admin/settings", methods=["POST"])
+@require_admin
+def admin_update_settings():
+    data = request.get_json() or {}
+    for k in ["default_price_etb", "default_period_days", "default_trial_days", "payments_enabled_globally"]:
+        if k in data:
+            SETTINGS[k] = data[k]
+    save_settings()
+    return jsonify({"ok": True, "settings": SETTINGS})
+
+@app.route("/admin/structure")
+@require_admin
+def admin_structure():
+    try:
+        return jsonify(build_structure())
+    except Exception as e:
+        err = traceback.format_exc()
+        print(f"❌ build_structure error:\n{err}")
+        return jsonify({"error": str(e), "traceback": err}), 500
+
+@app.route("/admin/video/<int:msg_id>", methods=["POST"])
+@require_admin
+def admin_edit_video(msg_id):
+    data = request.get_json() or {}
+    playlist = (data.get("playlist") or "").strip()
+    chapter = (data.get("chapter") or "").strip()
+    title = (data.get("title") or "").strip()
+    if not playlist or not chapter or not title:
+        return jsonify({"error": "playlist, chapter, title required"}), 400
+    msg = run(client.get_messages(CHANNEL, ids=msg_id))
+    if not msg or not msg.video:
+        return jsonify({"error": "video not found"}), 404
+    new_caption = f"{playlist}|{chapter}|{title}"
+    try:
+        run(client.edit_message(CHANNEL, msg_id, new_caption))
+    except Exception as e:
+        return jsonify({"error": f"edit failed: {e}"}), 500
+    return jsonify({"ok": True, "caption": new_caption})
+
+@app.route("/admin/video/<int:msg_id>", methods=["DELETE"])
+@require_admin
+def admin_delete_video(msg_id):
+    try:
+        run(client.delete_messages(CHANNEL, [msg_id]))
+    except Exception as e:
+        return jsonify({"error": f"delete failed: {e}"}), 500
+    return jsonify({"ok": True})
