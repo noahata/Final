@@ -10,7 +10,6 @@ from flask import Flask, request, Response, jsonify, render_template_string
 from flask_cors import CORS
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.types import DocumentAttributeVideo
 
 # ─── CONFIG ─────────────────────────────────────────
 API_ID           = int(os.environ["API_ID"])
@@ -27,7 +26,6 @@ SETTINGS_MSG_MARKER = "D2AI_SETTINGS_v1"
 
 app = Flask(__name__)
 CORS(app)
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024
 
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
@@ -442,7 +440,7 @@ def payment_success():
       <p>Return to D² Ai app.</p></body></html>"""
 
 # ═══════════════════════════════════════════════════
-#  PLAYLIST / CHAPTER / VIDEO
+#  PLAYLIST / CHAPTER / VIDEO (from Telegram captions)
 # ═══════════════════════════════════════════════════
 
 def parse_caption(caption):
@@ -473,6 +471,8 @@ def build_structure():
             "id": m.id,
             "tg_msg_id": m.id,
             "title": meta["title"],
+            "playlist": pl,
+            "chapter": ch,
             "duration": m.video.duration or 0,
             "size": m.video.size or 0,
             "stream_url": f"/stream/{m.id}",
@@ -758,40 +758,48 @@ def admin_update_settings():
     save_settings()
     return jsonify({"ok": True, "settings": SETTINGS})
 
-@app.route("/admin/upload", methods=["POST"])
-@require_admin
-def admin_upload():
-    file     = request.files.get("video")
-    playlist = request.form.get("playlist", "General").strip()
-    chapter  = request.form.get("chapter", "Uncategorized").strip()
-    title    = request.form.get("title", "Untitled").strip()
-
-    if not file:
-        return jsonify({"error": "no video file"}), 400
-
-    caption = f"{playlist}|{chapter}|{title}"
-
-    msg = run(client.send_file(
-        CHANNEL,
-        file=file.stream,
-        caption=caption,
-        supports_streaming=True,
-        attributes=[DocumentAttributeVideo(
-            duration=0, w=0, h=0, supports_streaming=True,
-        )],
-    ))
-
-    return jsonify({
-        "tg_msg_id": msg.id,
-        "caption": caption,
-        "stream_url": f"/stream/{msg.id}",
-        "download_url": f"/download/{msg.id}",
-    })
-
 @app.route("/admin/structure")
 @require_admin
 def admin_structure():
     return jsonify(build_structure())
+
+# ═══════════════════════════════════════════════════
+#  ADMIN VIDEO MANAGEMENT (NEW)
+# ═══════════════════════════════════════════════════
+
+@app.route("/admin/video/<int:msg_id>", methods=["POST"])
+@require_admin
+def admin_edit_video(msg_id):
+    """Edit video caption = change playlist|chapter|title."""
+    data = request.get_json() or {}
+    playlist = (data.get("playlist") or "").strip()
+    chapter  = (data.get("chapter") or "").strip()
+    title    = (data.get("title") or "").strip()
+
+    if not playlist or not chapter or not title:
+        return jsonify({"error": "playlist, chapter, title required"}), 400
+
+    msg = run(client.get_messages(CHANNEL, ids=msg_id))
+    if not msg or not msg.video:
+        return jsonify({"error": "video not found"}), 404
+
+    new_caption = f"{playlist}|{chapter}|{title}"
+    try:
+        run(client.edit_message(CHANNEL, msg_id, new_caption))
+    except Exception as e:
+        return jsonify({"error": f"edit failed: {e}"}), 500
+
+    return jsonify({"ok": True, "caption": new_caption})
+
+@app.route("/admin/video/<int:msg_id>", methods=["DELETE"])
+@require_admin
+def admin_delete_video(msg_id):
+    """Delete video from Telegram channel."""
+    try:
+        run(client.delete_messages(CHANNEL, [msg_id]))
+    except Exception as e:
+        return jsonify({"error": f"delete failed: {e}"}), 500
+    return jsonify({"ok": True})
 
 # ═══════════════════════════════════════════════════
 #  ADMIN PANEL HTML
@@ -808,7 +816,7 @@ ADMIN_HTML = """
   body { font-family: system-ui,sans-serif; margin:0; background:#f0f4f8; }
   header { background:#1976d2; color:white; padding:16px; }
   header h1 { margin:0; font-size:20px; }
-  .container { max-width:1000px; margin:20px auto; padding:0 16px; }
+  .container { max-width:1100px; margin:20px auto; padding:0 16px; }
   .card { background:white; border-radius:12px; padding:20px; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:20px; }
   .card h2 { margin-top:0; color:#1976d2; font-size:16px; }
   label { display:block; margin:12px 0 4px; font-size:13px; color:#555; }
@@ -818,17 +826,19 @@ ADMIN_HTML = """
   button:hover { background:#1565c0; }
   button.danger { background:#d32f2f; }
   button.small { padding:4px 10px; font-size:12px; margin-top:4px; }
-  .progress { height:6px; background:#e0e0e0; border-radius:3px; margin-top:12px; overflow:hidden; }
-  .progress-bar { height:100%; background:#1976d2; width:0%; transition:width .3s; }
   .status { margin-top:12px; font-size:13px; }
   .success { color:#2e7d32; }
   .error { color:#c62828; }
   table { width:100%; border-collapse:collapse; margin-top:12px; }
-  th,td { padding:8px; text-align:left; border-bottom:1px solid #eee; font-size:13px; }
+  th,td { padding:8px; text-align:left; border-bottom:1px solid #eee; font-size:13px; vertical-align:top; }
   th { background:#f5f5f5; }
-  .hint { background:#fff9c4; padding:10px; border-radius:6px; font-size:12px; margin-top:8px; color:#795548; }
+  .hint { background:#e3f2fd; padding:12px; border-radius:6px; font-size:13px; margin-bottom:12px; color:#0d47a1; }
   .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:100; align-items:center; justify-content:center; }
-  .modal { background:white; border-radius:12px; padding:24px; max-width:420px; width:90%; max-height:90vh; overflow-y:auto; }
+  .modal { background:white; border-radius:12px; padding:24px; max-width:500px; width:90%; max-height:90vh; overflow-y:auto; }
+  .video-row { display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid #eee; font-size:13px; gap:8px; }
+  .video-info { flex:1; }
+  .video-info b { color:#1976d2; }
+  .badge { display:inline-block; background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:10px; font-size:11px; margin-right:4px; }
 </style>
 </head>
 <body>
@@ -854,21 +864,20 @@ ADMIN_HTML = """
   </div>
 
   <div class="card">
-    <h2>📤 Upload Video</h2>
-    <div class="hint">Caption: <b>playlist|chapter|title</b></div>
-    <label>Playlist</label><input type="text" id="playlist" placeholder="e.g. Grade 10 Maths">
-    <label>Chapter</label><input type="text" id="chapter" placeholder="e.g. Algebra">
-    <label>Video Title</label><input type="text" id="title" placeholder="e.g. Video 1: Intro">
-    <label>Video File</label><input type="file" id="file" accept="video/*">
-    <button onclick="upload()">Upload to Telegram</button>
-    <div class="progress"><div class="progress-bar" id="bar"></div></div>
-    <div class="status" id="status"></div>
+    <h2>📤 How to Upload Videos</h2>
+    <div class="hint">
+      <b>Upload videos directly in Telegram</b> (not here):<br>
+      1. Open your Telegram channel<br>
+      2. Send video with caption: <code>playlist|chapter|title</code><br>
+      3. Example: <code>GRADE 11 MATHS|ALGEBRA|SOLVING</code><br>
+      4. Refresh below to see it.
+    </div>
   </div>
 
   <div class="card">
-    <h2>📚 Structure</h2>
-    <button onclick="loadStructure()">Refresh</button>
-    <div id="structure" style="margin-top:12px"></div>
+    <h2>📚 Videos Management</h2>
+    <button onclick="loadVideos()">Refresh Videos</button>
+    <div id="videos" style="margin-top:12px"></div>
   </div>
 
   <div class="card">
@@ -889,6 +898,22 @@ ADMIN_HTML = """
 
 </div>
 
+<!-- Edit video modal -->
+<div class="modal-bg" id="editModal">
+  <div class="modal">
+    <h3 id="editTitle" style="margin-top:0;color:#1976d2"></h3>
+    <label>Playlist</label><input type="text" id="editPlaylist">
+    <label>Chapter</label><input type="text" id="editChapter">
+    <label>Video Title</label><input type="text" id="editVideoTitle">
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="saveVideoEdit()">Save</button>
+      <button class="danger" onclick="closeEdit()">Cancel</button>
+    </div>
+    <div class="status" id="editStatus"></div>
+  </div>
+</div>
+
+<!-- User payment modal -->
 <div class="modal-bg" id="payModal">
   <div class="modal">
     <h3 id="payTitle" style="margin-top:0;color:#1976d2"></h3>
@@ -943,48 +968,108 @@ async function saveSettings() {
   $('settingsStatus').textContent = r.ok ? '✅ Saved' : '❌ Failed';
 }
 
-function upload() {
-  const file = $('file').files[0];
-  if (!file) return alert('Select video');
-  const fd = new FormData();
-  fd.append('video', file);
-  fd.append('playlist', $('playlist').value);
-  fd.append('chapter', $('chapter').value);
-  fd.append('title', $('title').value || file.name);
-
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/admin/upload');
-  xhr.setRequestHeader('X-Admin-Key', key());
-  xhr.upload.onprogress = e => {
-    const p = (e.loaded / e.total * 100).toFixed(1);
-    $('bar').style.width = p + '%';
-    $('status').textContent = 'Uploading... ' + p + '%';
-  };
-  xhr.onload = () => {
-    $('bar').style.width = '100%';
-    if (xhr.status === 200) {
-      const r = JSON.parse(xhr.responseText);
-      $('status').className = 'status success';
-      $('status').textContent = '✅ Uploaded! ID: ' + r.tg_msg_id;
-      loadStructure();
-    } else {
-      $('status').className = 'status error';
-      $('status').textContent = '❌ ' + xhr.responseText;
-    }
-  };
-  xhr.send(fd);
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-async function loadStructure() {
+// ── VIDEOS ──
+let allVideos = [];
+async function loadVideos() {
   const r = await fetch('/admin/structure', { headers: { 'X-Admin-Key': key() } });
-  if (!r.ok) return;
-  const list = await r.json();
-  $('structure').innerHTML = list.length === 0 ? '<i>No videos yet</i>' :
-    list.map(p => `<div style="margin-bottom:12px"><b>📘 ${p.title}</b> (${p.chapter_count} chapters)
-      ${p.chapters.map(c => `<div style="margin-left:16px;font-size:13px">📖 ${c.title} — ${c.videos.length} videos</div>`).join('')}
-    </div>`).join('');
+  if (!r.ok) { $('videos').innerHTML = '<i>Unauthorized</i>'; return; }
+  const playlists = await r.json();
+
+  // Flatten for easier display
+  allVideos = [];
+  playlists.forEach(p => {
+    p.chapters.forEach(c => {
+      c.videos.forEach(v => {
+        allVideos.push({
+          msg_id: v.tg_msg_id,
+          playlist: p.title,
+          chapter: c.title,
+          title: v.title,
+          size: v.size,
+          duration: v.duration,
+        });
+      });
+    });
+  });
+
+  if (allVideos.length === 0) {
+    $('videos').innerHTML = '<i>No videos yet. Upload via Telegram first.</i>';
+    return;
+  }
+
+  $('videos').innerHTML = allVideos.map(v => `
+    <div class="video-row">
+      <div class="video-info">
+        <div>
+          <span class="badge">#${v.msg_id}</span>
+          <b>${escapeHtml(v.title)}</b>
+        </div>
+        <div style="color:#666;font-size:12px;margin-top:4px">
+          📘 ${escapeHtml(v.playlist)} &nbsp;→&nbsp; 📖 ${escapeHtml(v.chapter)}
+          &nbsp;·&nbsp; ${(v.size/1024/1024).toFixed(1)} MB
+        </div>
+      </div>
+      <div>
+        <button class="small" onclick="openEdit(${v.msg_id}, '${escapeHtml(v.playlist)}', '${escapeHtml(v.chapter)}', '${escapeHtml(v.title)}')">✏️ Edit</button>
+        <button class="small danger" onclick="deleteVideo(${v.msg_id})">🗑 Delete</button>
+      </div>
+    </div>
+  `).join('');
 }
 
+let editingId = null;
+function openEdit(id, playlist, chapter, title) {
+  editingId = id;
+  $('editTitle').textContent = 'Edit Video #' + id;
+  $('editPlaylist').value = playlist;
+  $('editChapter').value = chapter;
+  $('editVideoTitle').value = title;
+  $('editStatus').textContent = '';
+  $('editModal').style.display = 'flex';
+}
+
+function closeEdit() {
+  $('editModal').style.display = 'none';
+  editingId = null;
+}
+
+async function saveVideoEdit() {
+  const body = {
+    playlist: $('editPlaylist').value,
+    chapter: $('editChapter').value,
+    title: $('editVideoTitle').value,
+  };
+  const r = await fetch('/admin/video/' + editingId, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.ok) {
+    $('editStatus').className = 'status success';
+    $('editStatus').textContent = '✅ Saved';
+    loadVideos();
+    setTimeout(closeEdit, 700);
+  } else {
+    $('editStatus').className = 'status error';
+    $('editStatus').textContent = '❌ Failed: ' + await r.text();
+  }
+}
+
+async function deleteVideo(id) {
+  if (!confirm('Delete video #' + id + '? This removes it from Telegram.')) return;
+  const r = await fetch('/admin/video/' + id, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Key': key() },
+  });
+  if (r.ok) loadVideos();
+  else alert('❌ Delete failed');
+}
+
+// ── USERS ──
 let allUsers = [];
 async function loadUsers() {
   const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
@@ -1004,10 +1089,6 @@ function filterUsers() {
 }
 
 function clearSearch() { $('userSearch').value = ''; renderUsers(allUsers); }
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
 
 function renderUsers(users) {
   $('userCount').textContent = users.length + ' user' + (users.length===1?'':'s');
@@ -1103,13 +1184,15 @@ document.addEventListener('keydown', e => {
   if (e.key === '/' && document.activeElement.tagName !== 'INPUT') {
     e.preventDefault(); $('userSearch').focus();
   }
-  if (e.key === 'Escape' && document.activeElement === $('userSearch')) {
-    clearSearch(); $('userSearch').blur();
+  if (e.key === 'Escape') {
+    if (document.activeElement === $('userSearch')) { clearSearch(); $('userSearch').blur(); }
+    if ($('editModal').style.display === 'flex') closeEdit();
+    if ($('payModal').style.display === 'flex') closeModal();
   }
 });
 
 loadSettings();
-loadStructure();
+loadVideos();
 </script>
 </body>
 </html>
@@ -1120,7 +1203,7 @@ def admin_page():
     return render_template_string(ADMIN_HTML)
 
 # ═══════════════════════════════════════════════════
-#  STARTUP (runs at module load)
+#  STARTUP
 # ═══════════════════════════════════════════════════
 print("🚀 Starting server...")
 try:
