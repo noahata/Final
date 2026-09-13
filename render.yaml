@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: d2ai-server
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: TG_SESSION
+        sync: false
+      - key: TG_CHANNEL
+        sync: false
+      - key: ADMIN_KEY
+        sync: false
+      - key: CHAPA_PUBLIC_KEY
+        sync: false
+      - key: CHAPA_SECRET_KEY
+        sync: false
+      - key: CHAPA_ENCRYPTION
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
