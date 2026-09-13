@@ -4,6 +4,7 @@ import json
 import hashlib
 import secrets
 import asyncio
+import traceback
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, request, Response, jsonify, render_template_string
@@ -27,10 +28,15 @@ SETTINGS_MSG_MARKER = "D2AI_SETTINGS_v1"
 app = Flask(__name__)
 CORS(app)
 
+# ─── TELEGRAM CLIENT ────────────────────────────────
+# We create our own event loop and use it consistently for all coroutines.
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+tg_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(tg_loop)
 
 def run(coro):
-    return client.loop.run_until_complete(coro)
+    """Run a coroutine on our dedicated event loop."""
+    return tg_loop.run_until_complete(coro)
 
 def hash_password(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
@@ -81,6 +87,7 @@ def load_users():
         print("ℹ️ No users DB yet — fresh start")
     except Exception as e:
         print(f"⚠️ load_users failed: {e}")
+        traceback.print_exc()
 
 def save_settings():
     global SETTINGS_MSG_ID
@@ -111,6 +118,7 @@ def load_settings():
         save_settings()
     except Exception as e:
         print(f"⚠️ load_settings failed: {e}")
+        traceback.print_exc()
 
 # ─── DECORATORS ─────────────────────────────────────
 def require_auth(f):
@@ -189,7 +197,27 @@ def health():
         "status": "ok",
         "users_loaded": len(USERS),
         "payments_global": SETTINGS.get("payments_enabled_globally"),
+        "telegram_connected": client.is_connected() if hasattr(client, "is_connected") else None,
     })
+
+@app.route("/diag")
+def diag():
+    """Diagnostic endpoint — check Telegram status"""
+    try:
+        me = run(client.get_me())
+        return jsonify({
+            "telegram_ok": True,
+            "me_name": me.first_name,
+            "me_id": me.id,
+            "channel_id": CHANNEL,
+            "users_count": len(USERS),
+        })
+    except Exception as e:
+        return jsonify({
+            "telegram_ok": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }), 500
 
 # ═══════════════════════════════════════════════════
 #  AUTH
@@ -452,6 +480,7 @@ def parse_caption(caption):
     return {"playlist": "General", "chapter": "Uncategorized", "title": caption}
 
 def build_structure():
+    """Read all videos from Telegram and group by playlist/chapter."""
     msgs = run(client.get_messages(CHANNEL, limit=1000))
     playlists = {}
     for m in msgs:
@@ -738,7 +767,13 @@ def admin_update_settings():
 @app.route("/admin/structure")
 @require_admin
 def admin_structure():
-    return jsonify(build_structure())
+    """List all videos — with full error reporting."""
+    try:
+        return jsonify(build_structure())
+    except Exception as e:
+        err = traceback.format_exc()
+        print(f"❌ build_structure error:\n{err}")
+        return jsonify({"error": str(e), "traceback": err}), 500
 
 @app.route("/admin/video/<int:msg_id>", methods=["POST"])
 @require_admin
@@ -811,6 +846,7 @@ ADMIN_HTML = """
   .video-info b { color:#1976d2; }
   .badge { display:inline-block; background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:10px; font-size:11px; margin-right:4px; }
   .hidden { display:none !important; }
+  pre { background:#f5f5f5; padding:8px; border-radius:4px; font-size:11px; overflow-x:auto; white-space:pre-wrap; word-break:break-all; }
 </style>
 </head>
 <body>
@@ -820,7 +856,6 @@ ADMIN_HTML = """
   <div class="card">
     <h2>🔑 Admin Key</h2>
     <input type="password" id="adminKey" placeholder="Enter admin key and press Enter">
-    <div class="status">Enter the admin key then press <b>Enter</b> or click <b>Load Panel</b>.</div>
     <button onclick="loadAll()">Load Panel</button>
     <div class="status" id="keyStatus"></div>
   </div>
@@ -829,408 +864,5 @@ ADMIN_HTML = """
 
     <div class="card">
       <h2>⚙️ Global Settings</h2>
-      <label><input type="checkbox" id="paymentsGlobal"> Enable payments globally (master switch)</label>
-      <label>Default Price (ETB)</label>
-      <input type="number" id="defPrice" value="100">
-      <label>Default Period (days)</label>
-      <input type="number" id="defPeriod" value="30">
-      <label>Default Trial (days)</label>
-      <input type="number" id="defTrial" value="3">
-      <button onclick="saveSettings()">Save Settings</button>
-      <div class="status" id="settingsStatus"></div>
-    </div>
-
-    <div class="card">
-      <h2>📤 How to Upload Videos</h2>
-      <div class="hint">
-        <b>Upload videos directly in Telegram</b> (not here):<br>
-        1. Open your Telegram channel<br>
-        2. Send video with caption: <code>playlist|chapter|title</code><br>
-        3. Example: <code>GRADE 11 MATHS|ALGEBRA|SOLVING</code><br>
-        4. Click <b>Refresh Videos</b> below to see it.
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>📚 Videos Management</h2>
-      <button onclick="loadVideos()">Refresh Videos</button>
-      <div id="videos" style="margin-top:12px"></div>
-    </div>
-
-    <div class="card">
-      <h2>👥 Users</h2>
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <input type="text" id="userSearch" placeholder="🔍 Search phone, name, device..." oninput="filterUsers()">
-        <button onclick="loadUsers()" style="margin-top:0">Refresh</button>
-        <button onclick="clearSearch()" style="margin-top:0;background:#888">Clear</button>
-      </div>
-      <div style="font-size:12px;color:#666;margin:8px 0" id="userCount">0 users</div>
-      <div style="overflow-x:auto">
-        <table id="usersTable">
-          <thead><tr><th>Phone</th><th>Name</th><th>Device</th><th>Payment</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
-
-  </div>
-
-</div>
-
-<!-- Edit video modal -->
-<div class="modal-bg" id="editModal">
-  <div class="modal">
-    <h3 id="editTitle" style="margin-top:0;color:#1976d2"></h3>
-    <label>Playlist</label><input type="text" id="editPlaylist">
-    <label>Chapter</label><input type="text" id="editChapter">
-    <label>Video Title</label><input type="text" id="editVideoTitle">
-    <div style="display:flex;gap:8px;margin-top:16px">
-      <button onclick="saveVideoEdit()">Save</button>
-      <button class="danger" onclick="closeEdit()">Cancel</button>
-    </div>
-    <div class="status" id="editStatus"></div>
-  </div>
-</div>
-
-<!-- User payment modal -->
-<div class="modal-bg" id="payModal">
-  <div class="modal">
-    <h3 id="payTitle" style="margin-top:0;color:#1976d2"></h3>
-    <label>Mode</label>
-    <select id="payMode">
-      <option value="free">Free (no payment)</option>
-      <option value="trial">Trial</option>
-      <option value="paid">Paid (must pay)</option>
-    </select>
-    <label>Price (ETB)</label><input type="number" id="payPrice" value="100">
-    <label>Period (days)</label><input type="number" id="payPeriod" value="30">
-    <label>Extend by (days)</label><input type="number" id="payExtend" value="0">
-    <label>Note</label><input type="text" id="payNote" placeholder="optional">
-    <div style="display:flex;gap:8px;margin-top:16px">
-      <button onclick="savePayment()">Save</button>
-      <button class="danger" onclick="closeModal()">Cancel</button>
-      <button class="danger" style="margin-left:auto" onclick="forceExpire()">Expire now</button>
-    </div>
-    <div class="status" id="payStatus"></div>
-  </div>
-</div>
-
-<script>
-const $ = id => document.getElementById(id);
-$('adminKey').value = localStorage.getItem('adminKey') || '';
-$('adminKey').onchange = () => localStorage.setItem('adminKey', $('adminKey').value);
-$('adminKey').onkeydown = (e) => { if (e.key === 'Enter') loadAll(); };
-const key = () => $('adminKey').value;
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-async function loadAll() {
-  if (!key()) {
-    $('keyStatus').className = 'status error';
-    $('keyStatus').textContent = '❌ Enter an admin key first';
-    return;
-  }
-  localStorage.setItem('adminKey', key());
-
-  // Test the key with a lightweight call
-  try {
-    const r = await fetch('/admin/settings', { headers: { 'X-Admin-Key': key() } });
-    if (r.status === 401) {
-      $('keyStatus').className = 'status error';
-      $('keyStatus').textContent = '❌ Unauthorized — wrong admin key';
-      $('panel').classList.add('hidden');
-      return;
-    }
-    if (!r.ok) {
-      $('keyStatus').className = 'status error';
-      $('keyStatus').textContent = '❌ Server error: ' + r.status;
-      return;
-    }
-    const s = await r.json();
-    $('paymentsGlobal').checked = s.payments_enabled_globally;
-    $('defPrice').value = s.default_price_etb;
-    $('defPeriod').value = s.default_period_days;
-    $('defTrial').value = s.default_trial_days;
-
-    $('keyStatus').className = 'status success';
-    $('keyStatus').textContent = '✅ Loaded';
-    $('panel').classList.remove('hidden');
-
-    // Load the rest
-    loadVideos();
-    loadUsers();
-  } catch (e) {
-    $('keyStatus').className = 'status error';
-    $('keyStatus').textContent = '❌ ' + e;
-  }
-}
-
-async function saveSettings() {
-  const body = {
-    payments_enabled_globally: $('paymentsGlobal').checked,
-    default_price_etb: parseInt($('defPrice').value),
-    default_period_days: parseInt($('defPeriod').value),
-    default_trial_days: parseInt($('defTrial').value),
-  };
-  const r = await fetch('/admin/settings', {
-    method: 'POST',
-    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  $('settingsStatus').className = r.ok ? 'status success' : 'status error';
-  $('settingsStatus').textContent = r.ok ? '✅ Saved' : '❌ Failed';
-}
-
-// ── VIDEOS ──
-let allVideos = [];
-async function loadVideos() {
-  $('videos').innerHTML = '<i>Loading…</i>';
-  const r = await fetch('/admin/structure', { headers: { 'X-Admin-Key': key() } });
-  if (!r.ok) {
-    $('videos').innerHTML = '<i>❌ Failed to load (' + r.status + ')</i>';
-    return;
-  }
-  const playlists = await r.json();
-
-  allVideos = [];
-  playlists.forEach(p => {
-    p.chapters.forEach(c => {
-      c.videos.forEach(v => {
-        allVideos.push({
-          msg_id: v.tg_msg_id,
-          playlist: p.title,
-          chapter: c.title,
-          title: v.title,
-          size: v.size,
-          duration: v.duration,
-        });
-      });
-    });
-  });
-
-  if (allVideos.length === 0) {
-    $('videos').innerHTML = '<i>No videos yet. Upload via Telegram first, then refresh.</i>';
-    return;
-  }
-
-  $('videos').innerHTML = allVideos.map(v => `
-    <div class="video-row">
-      <div class="video-info">
-        <div>
-          <span class="badge">#${v.msg_id}</span>
-          <b>${escapeHtml(v.title)}</b>
-        </div>
-        <div style="color:#666;font-size:12px;margin-top:4px">
-          📘 ${escapeHtml(v.playlist)} &nbsp;→&nbsp; 📖 ${escapeHtml(v.chapter)}
-          &nbsp;·&nbsp; ${(v.size/1024/1024).toFixed(1)} MB
-        </div>
-      </div>
-      <div>
-        <button class="small" onclick="openEdit(${v.msg_id}, '${escapeHtml(v.playlist)}', '${escapeHtml(v.chapter)}', '${escapeHtml(v.title)}')">✏️ Edit</button>
-        <button class="small danger" onclick="deleteVideo(${v.msg_id})">🗑 Delete</button>
-      </div>
-    </div>
-  `).join('');
-}
-
-let editingId = null;
-function openEdit(id, playlist, chapter, title) {
-  editingId = id;
-  $('editTitle').textContent = 'Edit Video #' + id;
-  $('editPlaylist').value = playlist;
-  $('editChapter').value = chapter;
-  $('editVideoTitle').value = title;
-  $('editStatus').textContent = '';
-  $('editModal').style.display = 'flex';
-}
-
-function closeEdit() {
-  $('editModal').style.display = 'none';
-  editingId = null;
-}
-
-async function saveVideoEdit() {
-  const body = {
-    playlist: $('editPlaylist').value,
-    chapter: $('editChapter').value,
-    title: $('editVideoTitle').value,
-  };
-  const r = await fetch('/admin/video/' + editingId, {
-    method: 'POST',
-    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (r.ok) {
-    $('editStatus').className = 'status success';
-    $('editStatus').textContent = '✅ Saved';
-    loadVideos();
-    setTimeout(closeEdit, 700);
-  } else {
-    $('editStatus').className = 'status error';
-    $('editStatus').textContent = '❌ Failed: ' + await r.text();
-  }
-}
-
-async function deleteVideo(id) {
-  if (!confirm('Delete video #' + id + '? This removes it from Telegram.')) return;
-  const r = await fetch('/admin/video/' + id, {
-    method: 'DELETE',
-    headers: { 'X-Admin-Key': key() },
-  });
-  if (r.ok) loadVideos();
-  else alert('❌ Delete failed');
-}
-
-// ── USERS ──
-let allUsers = [];
-async function loadUsers() {
-  const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
-  if (!r.ok) return;
-  allUsers = await r.json();
-  renderUsers(allUsers);
-}
-
-function filterUsers() {
-  const q = ($('userSearch').value || '').trim().toLowerCase();
-  if (!q) { renderUsers(allUsers); return; }
-  renderUsers(allUsers.filter(u =>
-    (u.phone||'').toLowerCase().includes(q) ||
-    (u.name||'').toLowerCase().includes(q) ||
-    (u.device_name||'').toLowerCase().includes(q)
-  ));
-}
-
-function clearSearch() { $('userSearch').value = ''; renderUsers(allUsers); }
-
-function renderUsers(users) {
-  $('userCount').textContent = users.length + ' user' + (users.length===1?'':'s');
-  if (users.length === 0) {
-    document.querySelector('#usersTable tbody').innerHTML =
-      '<tr><td colspan="6" style="text-align:center;color:#888;padding:20px">No users found</td></tr>';
-    return;
-  }
-  document.querySelector('#usersTable tbody').innerHTML = users.map(u => {
-    const s = u.state || {};
-    let badge = '';
-    if (s.status === 'free') badge = '<span style="color:green">free</span>';
-    else if (s.status === 'trial') badge = `<span style="color:blue">trial · ${s.days_left}d</span>`;
-    else if (s.status === 'active') badge = `<span style="color:green">active · ${s.days_left}d</span>`;
-    else if (s.status === 'expired') badge = '<span style="color:red">expired</span>';
-    else badge = '<span style="color:orange">no sub</span>';
-
-    return `<tr>
-      <td>${escapeHtml(u.phone)}</td>
-      <td>${escapeHtml(u.name || '-')}</td>
-      <td>${escapeHtml(u.device_name || '-')}</td>
-      <td>${badge} ${(u.payment && u.payment.price_etb) ? `(${u.payment.price_etb} ETB)` : ''}</td>
-      <td>${u.is_active ? '✅' : '⛔'}</td>
-      <td>
-        <button class="small" onclick="openPay('${u.phone}')">💳 Pay</button>
-        <button class="small" onclick="resetDevice('${u.phone}')">📱</button>
-        <button class="small danger" onclick="toggleUser('${u.phone}')">${u.is_active ? 'Dis' : 'Ena'}</button>
-      </td>
-    </tr>`;
-  }).join('');
-}
-
-let currentPhone = null;
-async function openPay(phone) {
-  currentPhone = phone;
-  const r = await fetch('/admin/user/' + phone + '/payment', { headers: { 'X-Admin-Key': key() } });
-  const data = await r.json();
-  const p = data.payment || {};
-  $('payTitle').textContent = 'Payment — ' + phone;
-  $('payMode').value = p.mode || 'free';
-  $('payPrice').value = p.price_etb || 100;
-  $('payPeriod').value = p.period_days || 30;
-  $('payExtend').value = 0;
-  $('payNote').value = p.note || '';
-  $('payStatus').textContent = '';
-  $('payModal').style.display = 'flex';
-}
-
-function closeModal() { $('payModal').style.display = 'none'; currentPhone = null; }
-
-async function savePayment() {
-  const body = {
-    mode: $('payMode').value,
-    price_etb: parseInt($('payPrice').value),
-    period_days: parseInt($('payPeriod').value),
-    note: $('payNote').value,
-  };
-  const ext = parseInt($('payExtend').value) || 0;
-  if (ext > 0) body.extend_days = ext;
-  const r = await fetch('/admin/user/' + currentPhone + '/payment', {
-    method: 'POST',
-    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  $('payStatus').className = r.ok ? 'status success' : 'status error';
-  $('payStatus').textContent = r.ok ? '✅ Saved' : '❌ Failed';
-  if (r.ok) { loadUsers(); setTimeout(closeModal, 800); }
-}
-
-async function forceExpire() {
-  if (!confirm('Force expire immediately?')) return;
-  await fetch('/admin/user/' + currentPhone + '/payment', {
-    method: 'POST',
-    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force_expire: true }),
-  });
-  $('payStatus').textContent = '✅ Expired';
-  loadUsers();
-}
-
-async function resetDevice(phone) {
-  if (!confirm('Reset device for ' + phone + '?')) return;
-  await fetch('/admin/reset-device/' + phone, { method: 'POST', headers: { 'X-Admin-Key': key() } });
-  loadUsers();
-}
-
-async function toggleUser(phone) {
-  await fetch('/admin/toggle-user/' + phone, { method: 'POST', headers: { 'X-Admin-Key': key() } });
-  loadUsers();
-}
-
-document.addEventListener('keydown', e => {
-  if (e.key === '/' && document.activeElement.tagName !== 'INPUT') {
-    e.preventDefault(); $('userSearch').focus();
-  }
-  if (e.key === 'Escape') {
-    if (document.activeElement === $('userSearch')) { clearSearch(); $('userSearch').blur(); }
-    if ($('editModal').style.display === 'flex') closeEdit();
-    if ($('payModal').style.display === 'flex') closeModal();
-  }
-});
-
-// Auto-load if key is already saved
-if (key()) loadAll();
-</script>
-</body>
-</html>
-"""
-
-@app.route("/admin")
-def admin_page():
-    return render_template_string(ADMIN_HTML)
-
-# ═══════════════════════════════════════════════════
-#  STARTUP
-# ═══════════════════════════════════════════════════
-print("🚀 Starting server...")
-try:
-    client.start()
-    load_users()
-    load_settings()
-    print("✅ Server ready")
-except Exception as e:
-    print(f"❌ Startup error: {e}")
-
-# ═══════════════════════════════════════════════════
-#  RUN
-# ═══════════════════════════════════════════════════
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+      <label><input type="checkbox" id="paymentsGlobal"> Enable payments globally</label>
+      <label
