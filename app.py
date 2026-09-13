@@ -186,14 +186,7 @@ def _require_active_subscription(f):
         return f(*args, **kwargs)
     return wrapper
 
-# ─── INIT ───────────────────────────────────────────
-@app.before_first_request
-def init():
-    run(client.start())
-    load_users()
-    load_settings()
-    print("✅ Server ready")
-
+# ─── HEALTH ─────────────────────────────────────────
 @app.route("/")
 def health():
     return jsonify({
@@ -345,7 +338,7 @@ def subscription_initialize():
         "last_name": request.phone,
         "phone_number": request.phone,
         "tx_ref": tx_ref,
-        "callback_url": f"{APP_BASE_URL}/payment/webhook",
+        "callback_url": f"{APP_BASE_URL}/verify",
         "return_url": f"{APP_BASE_URL}/payment/success?tx_ref={tx_ref}",
         "customization": {
             "title": "D² Ai Subscription",
@@ -377,7 +370,6 @@ def subscription_initialize():
     })
 
 def _handle_payment_webhook():
-    """Shared logic for /payment/webhook and /verify."""
     import requests as http
 
     data = request.get_json() or {}
@@ -391,7 +383,6 @@ def _handle_payment_webhook():
     if status and status != "success":
         return jsonify({"ok": True, "ignored": True})
 
-    # Verify with Chapa (prevents fake webhooks)
     try:
         v = http.get(
             f"{CHAPA_BASE_URL}/transaction/verify/{tx_ref}",
@@ -409,7 +400,6 @@ def _handle_payment_webhook():
         print(f"⚠️ Chapa verify error: {e}")
         return jsonify({"ok": True, "ignored": True})
 
-    # Activate subscription
     for phone, user in USERS.items():
         pay = user.get("payment", {})
         if pay.get("pending_tx_ref") == tx_ref:
@@ -1132,10 +1122,21 @@ loadStructure();
 def admin_page():
     return render_template_string(ADMIN_HTML)
 
-# ─── RUN ────────────────────────────────────────────
-if __name__ == "__main__":
+# ═══════════════════════════════════════════════════
+#  STARTUP (runs at module load — no decorator)
+# ═══════════════════════════════════════════════════
+print("🚀 Starting server...")
+try:
     run(client.start())
     load_users()
     load_settings()
+    print("✅ Server ready")
+except Exception as e:
+    print(f"❌ Startup error: {e}")
+
+# ═══════════════════════════════════════════════════
+#  RUN
+# ═══════════════════════════════════════════════════
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
