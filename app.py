@@ -180,3 +180,246 @@ def _require_active_subscription(f):
             }), 402
         return f(*args, **kwargs)
     return wrapper
+@app.route("/")
+def health():
+    return jsonify({
+        "status": "ok",
+        "users_loaded": len(USERS),
+        "payments_global": SETTINGS.get("payments_enabled_globally"),
+        "telegram_connected": client.is_connected() if hasattr(client, "is_connected") else None,
+    })
+
+@app.route("/diag")
+def diag():
+    try:
+        me = run(client.get_me())
+        return jsonify({
+            "telegram_ok": True,
+            "me_name": me.first_name,
+            "me_id": me.id,
+            "channel_id": CHANNEL,
+            "users_count": len(USERS),
+        })
+    except Exception as e:
+        return jsonify({"telegram_ok": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+@app.route("/auth/register", methods=["POST"])
+def register():
+    data = request.get_json() or {}
+    phone       = data.get("phone", "").strip()
+    password    = data.get("password", "")
+    name        = data.get("name", "").strip()
+    device_id   = data.get("device_id", "")
+    device_name = data.get("device_name", "Unknown")
+
+    if not phone or not password or not device_id:
+        return jsonify({"error": "phone, password, device_id required"}), 400
+    if phone in USERS:
+        return jsonify({"error": "phone already registered"}), 409
+
+    trial_days = SETTINGS.get("default_trial_days", 3)
+    USERS[phone] = {
+        "phone": phone,
+        "password_hash": hash_password(password),
+        "name": name,
+        "device_id": device_id,
+        "device_name": device_name,
+        "is_active": True,
+        "created_at": datetime.utcnow().isoformat(),
+        "last_login": None,
+        "payment": {
+            "mode": "trial",
+            "price_etb": SETTINGS["default_price_etb"],
+            "period_days": SETTINGS["default_period_days"],
+            "status": "trial",
+            "until": (datetime.utcnow() + timedelta(days=trial_days)).isoformat(),
+            "note": "",
+            "last_payment_at": None,
+            "last_payment_ref": None,
+            "pending_tx_ref": None,
+        },
+    }
+    save_users()
+    token = make_token()
+    SESSIONS[token] = {"phone": phone, "device_id": device_id}
+    return jsonify({"token": token, "user": {"phone": phone, "name": name}})
+
+@app.route("/auth/login", methods=["POST"])
+def login():
+    data = request.get_json() or {}
+    phone       = data.get("phone", "").strip()
+    password    = data.get("password", "")
+    device_id   = data.get("device_id", "")
+    device_name = data.get("device_name", "Unknown")
+
+    if not phone or not password or not device_id:
+        return jsonify({"error": "phone, password, device_id required"}), 400
+
+    user = USERS.get(phone)
+    if not user or user["password_hash"] != hash_password(password):
+        return jsonify({"error": "invalid credentials"}), 401
+    if not user.get("is_active", True):
+        return jsonify({"error": "account disabled"}), 403
+
+    if user.get("device_id") is None:
+        user["device_id"] = device_id
+        user["device_name"] = device_name
+    elif user["device_id"] != device_id:
+        return jsonify({
+            "error": "device_not_registered",
+            "message": "This account is locked to another device. Contact admin.",
+            "registered_device": user.get("device_name", "Unknown"),
+        }), 403
+
+    user["last_login"] = datetime.utcnow().isoformat()
+    save_users()
+    token = make_token()
+    SESSIONS[token] = {"phone": phone, "device_id": device_id}
+    return jsonify({
+        "token": token,
+        "user": {
+            "phone": phone,
+            "name": user["name"],
+            "device_name": user.get("device_name"),
+        },
+    })
+
+@app.route("/auth/me")
+@require_auth
+def me():
+    u = request.user
+    return jsonify({
+        "phone": u["phone"],
+        "name": u.get("name"),
+        "device_name": u.get("device_name"),
+        "last_login": u.get("last_login"),
+    })
+
+@app.route("/auth/logout", methods=["POST"])
+@require_auth
+def logout():
+    token = request.headers.get("Authorization", "")[7:]
+    SESSIONS.pop(token, None)
+    return jsonify({"ok": True})
+
+@app.route("/api/subscription/status")
+@require_auth
+def subscription_status():
+    state = _user_subscription_state(request.user)
+    pay = request.user.get("payment", {})
+    return jsonify({
+        "payments_enabled_globally": SETTINGS.get("payments_enabled_globally", False),
+        "mode": pay.get("mode", "free"),
+        "price_etb": state.get("price_etb", 0),
+        "period_days": pay.get("period_days", 30),
+        "subscription": state,
+    })
+
+@app.route("/api/subscription/initialize", methods=["POST"])
+@require_auth
+def subscription_initialize():
+    state = _user_subscription_state(request.user)
+    if not state["locked"]:
+        return jsonify({"error": "already active"}), 400
+
+    import requests as http
+    pay = request.user.setdefault("payment", {})
+    amount = pay.get("price_etb", SETTINGS["default_price_etb"])
+    tx_ref = f"d2ai-{request.phone.replace('+','')}-{secrets.token_hex(6)}"
+
+    payload = {
+        "amount": str(amount),
+        "currency": "ETB",
+        "email": f"{request.phone.replace('+','')}@d2ai.app",
+        "first_name": request.user.get("name") or "User",
+        "last_name": request.phone,
+        "phone_number": request.phone,
+        "tx_ref": tx_ref,
+        "callback_url": f"{APP_BASE_URL}/verify",
+        "return_url": f"{APP_BASE_URL}/payment/success?tx_ref={tx_ref}",
+        "customization": {
+            "title": "D² Ai Subscription",
+            "description": f"Access for {pay.get('period_days', 30)} days — {amount} ETB",
+        },
+    }
+
+    r = http.post(
+        f"{CHAPA_BASE_URL}/transaction/initialize",
+        json=payload,
+        headers={"Authorization": f"Bearer {CHAPA_SECRET_KEY}", "Content-Type": "application/json"},
+        timeout=20,
+    )
+    if r.status_code not in (200, 201):
+        return jsonify({"error": "chapa init failed", "detail": r.text}), 500
+
+    data = r.json()
+    pay["pending_tx_ref"] = tx_ref
+    pay["pending_amount"] = amount
+    save_users()
+    return jsonify({"checkout_url": data["data"]["checkout_url"], "tx_ref": tx_ref, "amount": amount})
+
+def _handle_payment_webhook():
+    import requests as http
+    data = request.get_json() or {}
+    tx_ref = data.get("tx_ref") or data.get("trx_ref")
+    status = data.get("status")
+    if not tx_ref:
+        return jsonify({"ok": True, "ignored": True})
+    if status and status != "success":
+        return jsonify({"ok": True, "ignored": True})
+
+    try:
+        v = http.get(
+            f"{CHAPA_BASE_URL}/transaction/verify/{tx_ref}",
+            headers={"Authorization": f"Bearer {CHAPA_SECRET_KEY}"},
+            timeout=15,
+        )
+        if v.status_code != 200:
+            return jsonify({"ok": True, "ignored": True})
+        verified = v.json().get("data", {})
+        if verified.get("status") != "success":
+            return jsonify({"ok": True, "ignored": True})
+    except Exception as e:
+        print(f"⚠️ Chapa verify error: {e}")
+        return jsonify({"ok": True, "ignored": True})
+
+    for phone, user in USERS.items():
+        pay = user.get("payment", {})
+        if pay.get("pending_tx_ref") == tx_ref:
+            now = datetime.utcnow()
+            period = pay.get("period_days", 30)
+            base = now
+            until_str = pay.get("until")
+            if until_str:
+                try:
+                    prev = datetime.fromisoformat(until_str)
+                    if prev > now:
+                        base = prev
+                except Exception:
+                    pass
+            pay["mode"] = "paid"
+            pay["status"] = "active"
+            pay["until"] = (base + timedelta(days=period)).isoformat()
+            pay["last_payment_ref"] = tx_ref
+            pay["last_payment_at"] = now.isoformat()
+            pay["pending_tx_ref"] = None
+            save_users()
+            print(f"✅ Payment verified: {phone}")
+            break
+    return jsonify({"ok": True, "verified": True})
+
+@app.route("/payment/webhook", methods=["POST"])
+def payment_webhook():
+    return _handle_payment_webhook()
+
+@app.route("/verify", methods=["POST"])
+def chapa_verify_alias():
+    return _handle_payment_webhook()
+
+@app.route("/payment/success")
+def payment_success():
+    tx_ref = request.args.get("tx_ref", "")
+    return f"""<html><body style="font-family:system-ui;text-align:center;padding:60px">
+      <h1>✅ Payment received</h1>
+      <p>Reference: <code>{tx_ref}</code></p>
+      <p>Return to D² Ai app.</p></body></html>"""
