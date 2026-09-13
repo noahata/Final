@@ -618,3 +618,328 @@ def admin_delete_video(msg_id):
     except Exception as e:
         return jsonify({"error": f"delete failed: {e}"}), 500
     return jsonify({"ok": True})
+
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>D² Ai Admin</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui,sans-serif; margin:0; background:#f0f4f8; }
+  header { background:#1976d2; color:white; padding:16px; }
+  header h1 { margin:0; font-size:20px; }
+  .container { max-width:1100px; margin:20px auto; padding:0 16px; }
+  .card { background:white; border-radius:12px; padding:20px; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:20px; }
+  .card h2 { margin-top:0; color:#1976d2; font-size:16px; }
+  label { display:block; margin:12px 0 4px; font-size:13px; color:#555; }
+  input,select { width:100%; padding:10px; border:1px solid #ccc; border-radius:6px; font-size:14px; }
+  input[type=checkbox] { width:auto; }
+  button { background:#1976d2; color:white; border:0; padding:10px 16px; border-radius:6px; font-size:14px; margin-top:12px; cursor:pointer; }
+  button:hover { background:#1565c0; }
+  button.danger { background:#d32f2f; }
+  button.small { padding:4px 10px; font-size:12px; margin-top:4px; }
+  .status { margin-top:12px; font-size:13px; }
+  .success { color:#2e7d32; }
+  .error { color:#c62828; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; }
+  th,td { padding:8px; text-align:left; border-bottom:1px solid #eee; font-size:13px; }
+  th { background:#f5f5f5; }
+  .hint { background:#e3f2fd; padding:12px; border-radius:6px; font-size:13px; margin-bottom:12px; color:#0d47a1; }
+  .modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:100; align-items:center; justify-content:center; }
+  .modal { background:white; border-radius:12px; padding:24px; max-width:500px; width:90%; max-height:90vh; overflow-y:auto; }
+  .video-row { display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid #eee; font-size:13px; gap:8px; }
+  .video-info { flex:1; }
+  .badge { display:inline-block; background:#e3f2fd; color:#1976d2; padding:2px 8px; border-radius:10px; font-size:11px; margin-right:4px; }
+  .hidden { display:none !important; }
+  pre { background:#f5f5f5; padding:8px; border-radius:4px; font-size:11px; overflow-x:auto; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<header><h1>D² Ai — Admin</h1></header>
+<div class="container">
+  <div class="card">
+    <h2>🔑 Admin Key</h2>
+    <input type="password" id="adminKey" placeholder="Enter admin key and press Enter">
+    <button onclick="loadAll()">Load Panel</button>
+    <div class="status" id="keyStatus"></div>
+  </div>
+  <div id="panel" class="hidden">
+    <div class="card">
+      <h2>⚙️ Global Settings</h2>
+      <label><input type="checkbox" id="paymentsGlobal"> Enable payments globally</label>
+      <label>Default Price (ETB)</label><input type="number" id="defPrice" value="100">
+      <label>Default Period (days)</label><input type="number" id="defPeriod" value="30">
+      <label>Default Trial (days)</label><input type="number" id="defTrial" value="3">
+      <button onclick="saveSettings()">Save Settings</button>
+      <div class="status" id="settingsStatus"></div>
+    </div>
+    <div class="card">
+      <h2>📤 How to Upload Videos</h2>
+      <div class="hint">
+        <b>Upload videos directly in Telegram</b>:<br>
+        1. Open your Telegram channel<br>
+        2. Send video with caption: <code>playlist|chapter|title</code><br>
+        3. Example: <code>GRADE 11 MATHS|ALGEBRA|SOLVING</code><br>
+        4. Refresh below.
+      </div>
+    </div>
+    <div class="card">
+      <h2>📚 Videos Management</h2>
+      <button onclick="loadVideos()">Refresh Videos</button>
+      <div id="videos" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
+      <h2>👥 Users</h2>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <input type="text" id="userSearch" placeholder="🔍 Search..." oninput="filterUsers()">
+        <button onclick="loadUsers()" style="margin-top:0">Refresh</button>
+        <button onclick="clearSearch()" style="margin-top:0;background:#888">Clear</button>
+      </div>
+      <div id="userCount" style="font-size:12px;color:#666;margin:8px 0">0 users</div>
+      <table id="usersTable">
+        <thead><tr><th>Phone</th><th>Name</th><th>Device</th><th>Payment</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="editModal"><div class="modal">
+  <h3 id="editTitle"></h3>
+  <label>Playlist</label><input type="text" id="editPlaylist">
+  <label>Chapter</label><input type="text" id="editChapter">
+  <label>Video Title</label><input type="text" id="editVideoTitle">
+  <div style="display:flex;gap:8px;margin-top:16px">
+    <button onclick="saveVideoEdit()">Save</button>
+    <button class="danger" onclick="closeEdit()">Cancel</button>
+  </div>
+  <div class="status" id="editStatus"></div>
+</div></div>
+
+<div class="modal-bg" id="payModal"><div class="modal">
+  <h3 id="payTitle"></h3>
+  <label>Mode</label>
+  <select id="payMode"><option value="free">Free</option><option value="trial">Trial</option><option value="paid">Paid</option></select>
+  <label>Price (ETB)</label><input type="number" id="payPrice" value="100">
+  <label>Period (days)</label><input type="number" id="payPeriod" value="30">
+  <label>Extend by (days)</label><input type="number" id="payExtend" value="0">
+  <label>Note</label><input type="text" id="payNote">
+  <div style="display:flex;gap:8px;margin-top:16px">
+    <button onclick="savePayment()">Save</button>
+    <button class="danger" onclick="closeModal()">Cancel</button>
+    <button class="danger" style="margin-left:auto" onclick="forceExpire()">Expire</button>
+  </div>
+  <div class="status" id="payStatus"></div>
+</div></div>
+
+<script>
+const $ = id => document.getElementById(id);
+$('adminKey').value = localStorage.getItem('adminKey') || '';
+$('adminKey').onchange = () => localStorage.setItem('adminKey', $('adminKey').value);
+$('adminKey').onkeydown = (e) => { if (e.key === 'Enter') loadAll(); };
+const key = () => $('adminKey').value;
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadAll() {
+  if (!key()) { $('keyStatus').textContent = '❌ Enter key'; $('keyStatus').className='status error'; return; }
+  localStorage.setItem('adminKey', key());
+  $('keyStatus').textContent = '⏳ Loading…';
+  try {
+    const r = await fetch('/admin/settings', { headers: { 'X-Admin-Key': key() } });
+    if (r.status === 401) {
+      $('keyStatus').textContent = '❌ Unauthorized';
+      $('keyStatus').className = 'status error';
+      $('panel').classList.add('hidden');
+      return;
+    }
+    if (!r.ok) { $('keyStatus').textContent = '❌ Error ' + r.status; return; }
+    const s = await r.json();
+    $('paymentsGlobal').checked = s.payments_enabled_globally;
+    $('defPrice').value = s.default_price_etb;
+    $('defPeriod').value = s.default_period_days;
+    $('defTrial').value = s.default_trial_days;
+    $('keyStatus').textContent = '✅ Loaded';
+    $('keyStatus').className = 'status success';
+    $('panel').classList.remove('hidden');
+    loadVideos();
+    loadUsers();
+  } catch (e) { $('keyStatus').textContent = '❌ ' + e; }
+}
+
+async function saveSettings() {
+  const body = {
+    payments_enabled_globally: $('paymentsGlobal').checked,
+    default_price_etb: parseInt($('defPrice').value),
+    default_period_days: parseInt($('defPeriod').value),
+    default_trial_days: parseInt($('defTrial').value),
+  };
+  const r = await fetch('/admin/settings', {
+    method: 'POST',
+    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  $('settingsStatus').textContent = r.ok ? '✅ Saved' : '❌ Failed';
+  $('settingsStatus').className = r.ok ? 'status success' : 'status error';
+}
+
+async function loadVideos() {
+  $('videos').innerHTML = '<i>Loading…</i>';
+  try {
+    const r = await fetch('/admin/structure', { headers: { 'X-Admin-Key': key() } });
+    const text = await r.text();
+    if (!r.ok) {
+      let errMsg = 'HTTP ' + r.status;
+      try { const j = JSON.parse(text); errMsg = j.error || errMsg; } catch(e){}
+      $('videos').innerHTML = '<div class="error">❌ ' + escapeHtml(errMsg) + '</div><pre>' + escapeHtml(text.substring(0,800)) + '</pre>';
+      return;
+    }
+    const playlists = JSON.parse(text);
+    const videos = [];
+    playlists.forEach(p => p.chapters.forEach(c => c.videos.forEach(v => {
+      videos.push({...v, playlist: p.title, chapter: c.title});
+    })));
+    if (videos.length === 0) { $('videos').innerHTML = '<i>No videos yet.</i>'; return; }
+    $('videos').innerHTML = videos.map(v => `
+      <div class="video-row">
+        <div class="video-info">
+          <div><span class="badge">#${v.tg_msg_id}</span> <b>${escapeHtml(v.title)}</b></div>
+          <div style="color:#666;font-size:12px;margin-top:4px">
+            📘 ${escapeHtml(v.playlist)} → 📖 ${escapeHtml(v.chapter)} · ${(v.size/1024/1024).toFixed(1)} MB
+          </div>
+        </div>
+        <div>
+          <button class="small" onclick="openEdit(${v.tg_msg_id}, '${escapeHtml(v.playlist)}', '${escapeHtml(v.chapter)}', '${escapeHtml(v.title)}')">✏️</button>
+          <button class="small danger" onclick="deleteVideo(${v.tg_msg_id})">🗑</button>
+        </div>
+      </div>`).join('');
+  } catch (e) { $('videos').innerHTML = '<div class="error">❌ ' + escapeHtml(String(e)) + '</div>'; }
+}
+
+let editingId = null;
+function openEdit(id, pl, ch, ti) {
+  editingId = id;
+  $('editTitle').textContent = 'Edit Video #' + id;
+  $('editPlaylist').value = pl; $('editChapter').value = ch; $('editVideoTitle').value = ti;
+  $('editStatus').textContent = '';
+  $('editModal').style.display = 'flex';
+}
+function closeEdit() { $('editModal').style.display = 'none'; editingId = null; }
+async function saveVideoEdit() {
+  const body = { playlist: $('editPlaylist').value, chapter: $('editChapter').value, title: $('editVideoTitle').value };
+  const r = await fetch('/admin/video/' + editingId, { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.ok) { $('editStatus').textContent = '✅ Saved'; loadVideos(); setTimeout(closeEdit, 700); }
+  else { $('editStatus').textContent = '❌ ' + await r.text(); }
+}
+async function deleteVideo(id) {
+  if (!confirm('Delete video #' + id + '?')) return;
+  const r = await fetch('/admin/video/' + id, { method: 'DELETE', headers: { 'X-Admin-Key': key() } });
+  if (r.ok) loadVideos();
+}
+
+let allUsers = [];
+async function loadUsers() {
+  const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
+  if (!r.ok) return;
+  allUsers = await r.json();
+  renderUsers(allUsers);
+}
+function filterUsers() {
+  const q = ($('userSearch').value || '').trim().toLowerCase();
+  renderUsers(q ? allUsers.filter(u => (u.phone||'').toLowerCase().includes(q) || (u.name||'').toLowerCase().includes(q) || (u.device_name||'').toLowerCase().includes(q)) : allUsers);
+}
+function clearSearch() { $('userSearch').value = ''; renderUsers(allUsers); }
+
+function renderUsers(users) {
+  $('userCount').textContent = users.length + ' user' + (users.length===1?'':'s');
+  if (users.length === 0) { document.querySelector('#usersTable tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888;padding:20px">No users</td></tr>'; return; }
+  document.querySelector('#usersTable tbody').innerHTML = users.map(u => {
+    const s = u.state || {};
+    let badge = '';
+    if (s.status === 'free') badge = '<span style="color:green">free</span>';
+    else if (s.status === 'trial') badge = `<span style="color:blue">trial · ${s.days_left}d</span>`;
+    else if (s.status === 'active') badge = `<span style="color:green">active · ${s.days_left}d</span>`;
+    else if (s.status === 'expired') badge = '<span style="color:red">expired</span>';
+    else badge = '<span style="color:orange">no sub</span>';
+    return `<tr>
+      <td>${escapeHtml(u.phone)}</td><td>${escapeHtml(u.name||'-')}</td><td>${escapeHtml(u.device_name||'-')}</td>
+      <td>${badge}</td><td>${u.is_active?'✅':'⛔'}</td>
+      <td><button class="small" onclick="openPay('${u.phone}')">💳</button>
+          <button class="small" onclick="resetDevice('${u.phone}')">📱</button>
+          <button class="small danger" onclick="toggleUser('${u.phone}')">${u.is_active?'Dis':'Ena'}</button></td>
+    </tr>`;
+  }).join('');
+}
+
+let currentPhone = null;
+async function openPay(phone) {
+  currentPhone = phone;
+  const r = await fetch('/admin/user/' + phone + '/payment', { headers: { 'X-Admin-Key': key() } });
+  const data = await r.json();
+  const p = data.payment || {};
+  $('payTitle').textContent = 'Payment — ' + phone;
+  $('payMode').value = p.mode || 'free';
+  $('payPrice').value = p.price_etb || 100;
+  $('payPeriod').value = p.period_days || 30;
+  $('payExtend').value = 0;
+  $('payNote').value = p.note || '';
+  $('payStatus').textContent = '';
+  $('payModal').style.display = 'flex';
+}
+function closeModal() { $('payModal').style.display = 'none'; currentPhone = null; }
+async function savePayment() {
+  const body = { mode: $('payMode').value, price_etb: parseInt($('payPrice').value), period_days: parseInt($('payPeriod').value), note: $('payNote').value };
+  const ext = parseInt($('payExtend').value) || 0;
+  if (ext > 0) body.extend_days = ext;
+  const r = await fetch('/admin/user/' + currentPhone + '/payment', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  $('payStatus').textContent = r.ok ? '✅ Saved' : '❌ Failed';
+  if (r.ok) { loadUsers(); setTimeout(closeModal, 800); }
+}
+async function forceExpire() {
+  if (!confirm('Expire now?')) return;
+  await fetch('/admin/user/' + currentPhone + '/payment', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ force_expire: true }) });
+  loadUsers();
+}
+async function resetDevice(phone) {
+  if (!confirm('Reset device for ' + phone + '?')) return;
+  await fetch('/admin/reset-device/' + phone, { method: 'POST', headers: { 'X-Admin-Key': key() } });
+  loadUsers();
+}
+async function toggleUser(phone) {
+  await fetch('/admin/toggle-user/' + phone, { method: 'POST', headers: { 'X-Admin-Key': key() } });
+  loadUsers();
+}
+
+if (key()) loadAll();
+</script>
+</body>
+</html>
+"""
+
+@app.route("/admin")
+def admin_page():
+    return render_template_string(ADMIN_HTML)
+
+print("🚀 Starting server...")
+try:
+    async def _start_client():
+        await client.start()
+        me = await client.get_me()
+        print(f"✅ Logged in as: {me.first_name} (ID: {me.id})")
+        return me
+
+    tg_loop.run_until_complete(_start_client())
+    load_users()
+    load_settings()
+    print("✅ Server ready")
+except Exception as e:
+    print(f"❌ Startup error: {e}")
+    traceback.print_exc()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
