@@ -427,8 +427,11 @@ def stream(message_id):
     info = get_msg_file_info(msg)
     if not info:
         return "Not found", 404
+
     file_size = info["size"]
     mime = info["mime"]
+    media = msg.video or msg.document
+
     range_header = request.headers.get("Range")
     start, end, status = 0, file_size - 1, 200
     if range_header:
@@ -440,15 +443,33 @@ def stream(message_id):
             end = min(end, file_size - 1)
             status = 206
     length = end - start + 1
+
     def generate():
+        CHUNK = 4096
+        aligned_start = (start // CHUNK) * CHUNK
+        skip_bytes = start - aligned_start
+        aligned_limit = length + skip_bytes
         buf = io.BytesIO()
-        run(client.download_media(msg, file=buf, offset=start, limit=length))
-        buf.seek(0)
-        chunk = 256 * 1024
-        while True:
-            data = buf.read(chunk)
-            if not data: break
-            yield data
+        try:
+            for chunk in client.iter_download(
+                media,
+                offset=aligned_start,
+                limit=aligned_limit,
+                chunk_size=CHUNK * 64,
+            ):
+                buf.write(chunk)
+        except Exception as e:
+            print(f"stream download error: {e}")
+            return
+        buf.seek(skip_bytes)
+        remaining = length
+        while remaining > 0:
+            piece = buf.read(min(262144, remaining))
+            if not piece:
+                break
+            remaining -= len(piece)
+            yield piece
+
     return Response(generate(), status=status, headers={
         "Content-Type": mime, "Accept-Ranges": "bytes",
         "Content-Length": str(length),
@@ -709,7 +730,8 @@ ADMIN_HTML = """
         1. Open your Telegram channel<br>
         2. Send video with caption: <code>playlist|chapter|title</code><br>
         3. Example: <code>GRADE 11 MATHS|ALGEBRA|SOLVING</code><br>
-        4. Refresh below.
+        4. Refresh below.<br><br>
+        <b>Custom thumbnails:</b> reply to a video with a photo to use it as that video's thumbnail.
       </div>
     </div>
     <div class="card">
