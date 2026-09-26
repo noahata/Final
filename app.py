@@ -458,23 +458,36 @@ def stream(message_id):
 
 @app.route("/download/<int:message_id>")
 @require_auth
-@_require_active_subscription
 def download(message_id):
     msg = run(client.get_messages(CHANNEL, ids=message_id))
-    info = get_msg_file_info(msg)
-    if not info:
+    if not msg:
         return "Not found", 404
+
+    file_size = 0
+    mime = "video/mp4"
+    media = None
+    if msg.video:
+        media = msg.video
+        file_size = msg.video.size
+        mime = msg.video.mime_type or "video/mp4"
+    elif msg.document:
+        media = msg.document
+        file_size = msg.document.size
+        mime = msg.document.mime_type or "video/mp4"
+    else:
+        return "Not a video file", 404
+
     def generate():
-        buf = io.BytesIO()
-        run(client.download_media(msg, file=buf))
-        buf.seek(0)
-        chunk = 512 * 1024
-        while True:
-            data = buf.read(chunk)
-            if not data: break
-            yield data
+        try:
+            for chunk in client.iter_download(media, chunk_size=524288):
+                yield chunk
+        except Exception as e:
+            print(f"download error: {e}")
+            return
+
     return Response(generate(), headers={
-        "Content-Type": info["mime"], "Content-Length": str(info["size"]),
+        "Content-Type": mime,
+        "Content-Length": str(file_size),
         "Content-Disposition": f'attachment; filename="{message_id}.mp4"',
         "Accept-Ranges": "bytes",
     })
