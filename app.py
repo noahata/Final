@@ -482,9 +482,23 @@ def download(message_id):
 @app.route("/thumb/<int:message_id>")
 @require_auth
 def thumb(message_id):
+    # 1. Look for a custom thumbnail posted as reply to the video
+    try:
+        msgs = run(client.get_messages(CHANNEL, limit=500))
+        for m in msgs:
+            if (m.photo and m.reply_to and
+                hasattr(m.reply_to, 'reply_to_msg_id') and
+                m.reply_to.reply_to_msg_id == message_id):
+                buf = io.BytesIO()
+                run(client.download_media(m, file=buf))
+                buf.seek(0)
+                return Response(buf.read(), mimetype="image/jpeg")
+    except Exception as e:
+        print(f"Custom thumb lookup failed: {e}")
+
+    # 2. Fall back to Telegram's auto thumbnail
     msg = run(client.get_messages(CHANNEL, ids=message_id))
-    info = get_msg_file_info(msg)
-    if not info or not info["thumbs"]:
+    if not msg or not msg.video or not msg.video.thumbs:
         return "", 404
     buf = io.BytesIO()
     run(client.download_media(msg, file=buf, thumb=-1))
