@@ -167,12 +167,9 @@ def _require_active_subscription(f):
     return wrapper
 
 def get_msg_file_info(msg):
-    """Extract file info safely — works for Video, Document, or hybrid."""
-    if not msg:
-        return None
+    if not msg: return None
     media = msg.video or msg.document
-    if not media:
-        return None
+    if not media: return None
     return {
         "size":     getattr(media, "size", 0) or 0,
         "mime":     getattr(media, "mime_type", None) or "video/mp4",
@@ -275,6 +272,13 @@ def subscription_status():
         "subscription": state,
     })
 
+@app.route("/api/ai/check", methods=["GET"])
+@require_auth
+@_require_active_subscription
+def check_ai_access():
+    # If the code reaches here, the user has paid.
+    return jsonify({"allowed": True})
+
 @app.route("/api/subscription/initialize", methods=["POST"])
 @require_auth
 def subscription_initialize():
@@ -351,21 +355,21 @@ def chapa_verify_alias():
 @app.route("/payment/success")
 def payment_success():
     tx_ref = request.args.get("tx_ref", "")
-    return f"""<html><body style="font-family:system-ui;text-align:center;padding:60px">
+    return f"""<html><body style="font-family:system-ui;text-align:center;padding:60px;background:#0F172A;color:white;">
       <h1>✅ Payment received</h1><p>Ref: <code>{tx_ref}</code></p>
       <p>Return to D² Ai app.</p></body></html>"""
 
 def parse_caption(caption):
     if not caption:
         return None
-    parts = [p.strip() for p in caption.split("|", 2)]
-    if len(parts) == 3:
-        return {"playlist": parts[0], "chapter": parts[1], "title": parts[2]}
-    return {"playlist": "General", "chapter": "Uncategorized", "title": caption}
+    parts = [p.strip() for p in caption.split("|", 3)]
+    if len(parts) == 4:
+        return {"subject": parts[0], "grade": parts[1], "chapter": parts[2], "topic": parts[3]}
+    return {"subject": "General", "grade": "General", "chapter": "Uncategorized", "topic": caption}
 
 def build_structure():
     msgs = run(client.get_messages(CHANNEL, limit=1000))
-    playlists = {}
+    grades = {}
     for m in msgs:
         info = get_msg_file_info(m)
         if not info:
@@ -375,53 +379,51 @@ def build_structure():
         meta = parse_caption(m.message or "")
         if not meta:
             continue
-        pl = meta["playlist"]
+        
+        grade_name = meta["grade"]
+        subject = meta["subject"]
+        
+        if grade_name not in grades:
+            grades[grade_name] = {"grade": grade_name, "subjects": {}}
+        if subject not in grades[grade_name]["subjects"]:
+            grades[grade_name]["subjects"][subject] = {"subject": subject, "chapters": {}}
+            
         ch = meta["chapter"]
-        playlists.setdefault(pl, {"title": pl, "chapters": {}})
-        playlists[pl]["chapters"].setdefault(ch, {"title": ch, "videos": []})
-        playlists[pl]["chapters"][ch]["videos"].append({
-            "id": m.id, "tg_msg_id": m.id, "title": meta["title"],
-            "playlist": pl, "chapter": ch,
+        if ch not in grades[grade_name]["subjects"][subject]["chapters"]:
+            grades[grade_name]["subjects"][subject]["chapters"][ch] = {"chapter": ch, "videos": []}
+            
+        grades[grade_name]["subjects"][subject]["chapters"][ch]["videos"].append({
+            "id": m.id, "tg_msg_id": m.id, "title": meta["topic"],
+            "playlist": subject, "grade": grade_name, "chapter": ch, "subject": subject,
             "duration": info["duration"], "size": info["size"], "mime": info["mime"],
             "stream_url": f"/stream/{m.id}", "download_url": f"/download/{m.id}", "thumb_url": f"/thumb/{m.id}",
         })
+        
     result = []
-    for pl in playlists.values():
-        pl["chapters"] = list(pl["chapters"].values())
-        for c in pl["chapters"]:
-            c["videos"].sort(key=lambda v: v["tg_msg_id"])
-        pl["chapter_count"] = len(pl["chapters"])
-        result.append(pl)
+    for g in grades.values():
+        g["subjects"] = list(g["subjects"].values())
+        for s in g["subjects"]:
+            s["chapters"] = list(s["chapters"].values())
+            for c in s["chapters"]:
+                c["videos"].sort(key=lambda v: v["tg_msg_id"])
+        result.append(g)
     return result
 
 @app.route("/api/playlists")
 @require_auth
 def api_playlists():
-    return jsonify([{"title": p["title"], "chapter_count": p["chapter_count"]} for p in build_structure()])
+    return jsonify([{"title": g["grade"], "subject_count": len(g["subjects"])} for g in build_structure()])
 
-@app.route("/api/playlist/<string:name>")
+@app.route("/api/grade/<string:grade_name>")
 @require_auth
-@_require_active_subscription
-def api_playlist(name):
-    for p in build_structure():
-        if p["title"] == name:
-            return jsonify({"title": p["title"], "chapters": [{"title": c["title"], "video_count": len(c["videos"])} for c in p["chapters"]]})
-    return jsonify({"error": "not found"}), 404
-
-@app.route("/api/playlist/<string:pl_name>/chapter/<string:ch_name>")
-@require_auth
-@_require_active_subscription
-def api_chapter(pl_name, ch_name):
-    for p in build_structure():
-        if p["title"] == pl_name:
-            for c in p["chapters"]:
-                if c["title"] == ch_name:
-                    return jsonify({"playlist": pl_name, "chapter": ch_name, "videos": c["videos"]})
+def api_grade(grade_name):
+    for g in build_structure():
+        if g["grade"] == grade_name:
+            return jsonify(g)
     return jsonify({"error": "not found"}), 404
 
 @app.route("/stream/<int:message_id>")
 @require_auth
-@_require_active_subscription
 def stream(message_id):
     msg = run(client.get_messages(CHANNEL, ids=message_id))
     info = get_msg_file_info(msg)
@@ -451,12 +453,7 @@ def stream(message_id):
         aligned_limit = length + skip_bytes
         buf = io.BytesIO()
         try:
-            for chunk in client.iter_download(
-                media,
-                offset=aligned_start,
-                limit=aligned_limit,
-                chunk_size=CHUNK * 64,
-            ):
+            for chunk in client.iter_download(media, offset=aligned_start, limit=aligned_limit, chunk_size=CHUNK * 64):
                 buf.write(chunk)
         except Exception as e:
             print(f"stream download error: {e}")
@@ -516,7 +513,6 @@ def download(message_id):
 @app.route("/thumb/<int:message_id>")
 @require_auth
 def thumb(message_id):
-    # 1. Look for a custom thumbnail posted as reply to the video
     try:
         msgs = run(client.get_messages(CHANNEL, limit=500))
         for m in msgs:
@@ -530,7 +526,6 @@ def thumb(message_id):
     except Exception as e:
         print(f"Custom thumb lookup failed: {e}")
 
-    # 2. Fall back to Telegram's auto thumbnail
     msg = run(client.get_messages(CHANNEL, ids=message_id))
     if not msg or not msg.video or not msg.video.thumbs:
         return "", 404
@@ -643,15 +638,16 @@ def admin_structure():
 @require_admin
 def admin_edit_video(msg_id):
     data = request.get_json() or {}
-    playlist = (data.get("playlist") or "").strip()
+    subject = (data.get("subject") or "").strip()
+    grade = (data.get("grade") or "").strip()
     chapter = (data.get("chapter") or "").strip()
-    title = (data.get("title") or "").strip()
-    if not playlist or not chapter or not title:
-        return jsonify({"error": "playlist, chapter, title required"}), 400
+    topic = (data.get("title") or "").strip()
+    if not subject or not grade or not chapter or not topic:
+        return jsonify({"error": "subject, grade, chapter, title required"}), 400
     msg = run(client.get_messages(CHANNEL, ids=msg_id))
     if not get_msg_file_info(msg):
         return jsonify({"error": "video not found"}), 404
-    new_caption = f"{playlist}|{chapter}|{title}"
+    new_caption = f"{subject}|{grade}|{chapter}|{topic}"
     try:
         run(client.edit_message(CHANNEL, msg_id, new_caption))
     except Exception as e:
@@ -728,10 +724,10 @@ ADMIN_HTML = """
       <div class="hint">
         <b>Upload videos directly in Telegram</b>:<br>
         1. Open your Telegram channel<br>
-        2. Send video with caption: <code>playlist|chapter|title</code><br>
-        3. Example: <code>GRADE 11 MATHS|ALGEBRA|SOLVING</code><br>
-        4. Refresh below.<br><br>
-        <b>Custom thumbnails:</b> reply to a video with a photo to use it as that video's thumbnail.
+        2. Send video with caption: <code>Subject|Grade|Chapter|Topic</code><br>
+        3. Example: <code>Maths|Grade 10|Algebra|Linear Equations</code><br>
+        4. Reply to the video with a photo to set a custom thumbnail.<br>
+        5. Refresh below.<br>
       </div>
     </div>
     <div class="card">
@@ -757,9 +753,10 @@ ADMIN_HTML = """
 
 <div class="modal-bg" id="editModal"><div class="modal">
   <h3 id="editTitle"></h3>
-  <label>Playlist</label><input type="text" id="editPlaylist">
+  <label>Subject</label><input type="text" id="editSubject">
+  <label>Grade</label><input type="text" id="editGrade">
   <label>Chapter</label><input type="text" id="editChapter">
-  <label>Video Title</label><input type="text" id="editVideoTitle">
+  <label>Topic/Title</label><input type="text" id="editVideoTitle">
   <div style="display:flex;gap:8px;margin-top:16px">
     <button onclick="saveVideoEdit()">Save</button>
     <button class="danger" onclick="closeEdit()">Cancel</button>
@@ -847,22 +844,24 @@ async function loadVideos() {
       $('videos').innerHTML = '<div class="error">❌ ' + escapeHtml(errMsg) + '</div><pre>' + escapeHtml(text.substring(0,800)) + '</pre>';
       return;
     }
-    const playlists = JSON.parse(text);
+    const grades = JSON.parse(text);
     const videos = [];
-    playlists.forEach(p => p.chapters.forEach(c => c.videos.forEach(v => {
-      videos.push({...v, playlist: p.title, chapter: c.title});
-    })));
+    grades.forEach(g => g.subjects.forEach(s => s.chapters.forEach(c => c.videos.forEach(v => {
+      videos.push({...v, grade: g.grade, subject: s.subject, chapter: c.chapter});
+    }))));
+    
     if (videos.length === 0) { $('videos').innerHTML = '<i>No videos yet.</i>'; return; }
+    
     $('videos').innerHTML = videos.map(v => `
       <div class="video-row">
         <div class="video-info">
           <div><span class="badge">#${v.tg_msg_id}</span> <b>${escapeHtml(v.title)}</b></div>
           <div style="color:#666;font-size:12px;margin-top:4px">
-            📘 ${escapeHtml(v.playlist)} → 📖 ${escapeHtml(v.chapter)} · ${(v.size/1024/1024).toFixed(1)} MB
+            🎓 ${escapeHtml(v.grade)} → 📘 ${escapeHtml(v.subject)} → 📖 ${escapeHtml(v.chapter)}
           </div>
         </div>
         <div>
-          <button class="small" onclick="openEdit(${v.tg_msg_id}, '${escapeHtml(v.playlist)}', '${escapeHtml(v.chapter)}', '${escapeHtml(v.title)}')">✏️</button>
+          <button class="small" onclick="openEdit(${v.tg_msg_id}, '${escapeHtml(v.grade)}', '${escapeHtml(v.subject)}', '${escapeHtml(v.chapter)}', '${escapeHtml(v.title)}')">✏️</button>
           <button class="small danger" onclick="deleteVideo(${v.tg_msg_id})">🗑</button>
         </div>
       </div>`).join('');
@@ -870,16 +869,21 @@ async function loadVideos() {
 }
 
 let editingId = null;
-function openEdit(id, pl, ch, ti) {
+function openEdit(id, gr, sb, ch, ti) {
   editingId = id;
   $('editTitle').textContent = 'Edit Video #' + id;
-  $('editPlaylist').value = pl; $('editChapter').value = ch; $('editVideoTitle').value = ti;
+  $('editGrade').value = gr; $('editSubject').value = sb; $('editChapter').value = ch; $('editVideoTitle').value = ti;
   $('editStatus').textContent = '';
   $('editModal').style.display = 'flex';
 }
 function closeEdit() { $('editModal').style.display = 'none'; editingId = null; }
 async function saveVideoEdit() {
-  const body = { playlist: $('editPlaylist').value, chapter: $('editChapter').value, title: $('editVideoTitle').value };
+  const body = { 
+    grade: $('editGrade').value, 
+    subject: $('editSubject').value, 
+    chapter: $('editChapter').value, 
+    title: $('editVideoTitle').value 
+  };
   const r = await fetch('/admin/video/' + editingId, { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (r.ok) { $('editStatus').textContent = '✅ Saved'; loadVideos(); setTimeout(closeEdit, 700); }
   else { $('editStatus').textContent = '❌ ' + await r.text(); }
@@ -972,6 +976,69 @@ if (key()) loadAll();
 @app.route("/admin")
 def admin_page():
     return render_template_string(ADMIN_HTML)
+
+PAYMENT_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>D² Ai - Payment</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; text-align: center; padding: 40px 20px; background: #0F172A; color: white; }
+  .card { background: #1E293B; padding: 30px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+  h1 { color: #3b82f6; }
+  button { background: #10b981; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 8px; margin-top: 20px; width: 100%; cursor: pointer; font-weight: bold; }
+  button:hover { background: #059669; }
+  #status { color: #ef4444; margin-top: 15px; font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Subscribe to D² Ai</h1>
+    <p>Get unlimited access to all premium videos and the Offline AI Tutor.</p>
+    <h2>100 ETB / 30 Days</h2>
+    <button onclick="startPayment()">Pay with Chapa</button>
+    <p id="status"></p>
+  </div>
+
+  <script>
+    async function startPayment() {
+      const status = document.getElementById('status');
+      status.innerText = "Initializing payment...";
+      
+      const urlParams = new URLSearchParams(window.location.search);
+      const token = urlParams.get('token');
+      
+      if (!token) {
+        status.innerText = "Error: No login token found. Please login from the app.";
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/subscription/initialize', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
+        });
+        
+        const data = await res.json();
+        
+        if (data.checkout_url) {
+          window.location.href = data.checkout_url;
+        } else {
+          status.innerText = "Error: " + (data.error || "Unknown error");
+        }
+      } catch (e) {
+        status.innerText = "Network Error: " + e;
+      }
+    }
+  </script>
+</body>
+</html>
+"""
+
+@app.route("/payment")
+def payment_page():
+    return render_template_string(PAYMENT_HTML)
 
 print("🚀 Starting server...")
 try:
