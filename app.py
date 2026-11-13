@@ -240,6 +240,71 @@ def payment_success():
     </body></html>
     """
 
+# --- THIS IS THE PAGE YOU WERE MISSING ---
+PAYMENT_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>D² Ai - Payment</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; text-align: center; padding: 40px 20px; background: #0F172A; color: white; }
+  .card { background: #1E293B; padding: 30px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid #334155; }
+  h1 { color: #3b82f6; }
+  button { background: #10b981; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 8px; margin-top: 20px; width: 100%; cursor: pointer; font-weight: bold; }
+  button:hover { background: #059669; }
+  #status { color: #ef4444; margin-top: 15px; font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Subscribe to D² Ai</h1>
+    <p>Get unlimited access to all premium videos and the Offline AI Tutor.</p>
+    <h2>100 ETB / 30 Days</h2>
+    <button onclick="startPayment()">Pay with Chapa</button>
+    <p id="status"></p>
+  </div>
+
+  <script>
+    async function startPayment() {
+      const status = document.getElementById('status');
+      status.innerText = "Initializing payment...";
+      
+      const urlParams = new URLSearchParams(window.location.search);
+      const token = urlParams.get('token');
+      
+      if (!token) {
+        status.innerText = "Error: No login token found. Please login from the app.";
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/subscription/initialize', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
+        });
+        
+        const data = await res.json();
+        
+        if (data.checkout_url) {
+          window.location.href = data.checkout_url;
+        } else {
+          status.innerText = "Error: " + (data.error || "Unknown error");
+        }
+      } catch (e) {
+        status.innerText = "Network Error: " + e;
+      }
+    }
+  </script>
+</body>
+</html>
+"""
+
+@app.route("/payment")
+def payment_page():
+    return render_template_string(PAYMENT_HTML)
+# ------------------------------------------
+
 def parse_caption(caption):
     if not caption: return None
     parts = [p.strip() for p in caption.split("|", 3)]
