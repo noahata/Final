@@ -29,17 +29,6 @@ app = Flask(__name__)
 CORS(app)
 
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
-tg_loop = asyncio.new_event_loop()
-asyncio.set_event_loop(tg_loop)
-
-def run(coro):
-    return tg_loop.run_until_complete(coro)
-
-def hash_password(pw):
-    return hashlib.sha256(pw.encode()).hexdigest()
-
-def make_token():
-    return secrets.token_urlsafe(48)
 
 USERS = {}
 SESSIONS = {}
@@ -47,6 +36,28 @@ ACTIVATION_CODES = {}
 USERS_MSG_ID = None
 SETTINGS_MSG_ID = None
 CODES_MSG_ID = None
+
+# --- THREAD-SAFE LOOP RUNNER (FIXES STREAMING CRASH) ---
+def run(coro):
+    try:
+        loop = asyncio.get_running_loop()
+        # If a loop is running, we must use run_coroutine_threadsafe
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
+    except RuntimeError:
+        # If no loop is running (Flask thread), create a new one
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+# -------------------------------------------------------
+
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def make_token():
+    return secrets.token_urlsafe(48)
 
 DEFAULT_SETTINGS = {
     "default_price_etb": 100,
@@ -225,14 +236,12 @@ def redeem_code():
     save_users(); save_codes()
     return jsonify({"ok": True, "message": f"Successfully added {days} days!"})
 
-# --- ZERO AUTH PAYMENT FLOW (WITH ERROR CATCHING) ---
 @app.route("/api/subscription/pay_direct", methods=["POST"])
 def pay_direct():
     try:
         data = request.get_json() or {}
         phone = data.get("phone", "0912345678").strip()
         
-        # Clean phone number format
         if phone.startswith("0"): phone = "+251" + phone[1:]
         elif not phone.startswith("+"): phone = "+251" + phone
 
@@ -241,7 +250,7 @@ def pay_direct():
         
         payload = {
             "amount": str(amount), "currency": "ETB",
-            "email": f"{phone.replace('+','')}@d2ai.app",
+            "email": "test@chapa.co",
             "first_name": "Guest", "last_name": "User", "phone_number": phone,
             "tx_ref": tx_ref,
             "callback_url": f"{APP_BASE_URL}/verify",
@@ -275,7 +284,6 @@ def payment_success():
     </body></html>
     """
 
-# --- THE PAYMENT WEB PAGE (NO LOGIN REQUIRED) ---
 PAYMENT_HTML = """
 <!DOCTYPE html>
 <html>
@@ -297,7 +305,6 @@ PAYMENT_HTML = """
     <h1>Subscribe to D² Ai</h1>
     <p>Get unlimited access to all premium videos and the Offline AI Tutor.</p>
     <h2>100 ETB / 30 Days</h2>
-    
     <input type="tel" id="phone" placeholder="Enter phone (e.g., 0912345678)">
     <button onclick="startPayment()">Pay with Chapa</button>
     <p id="status"></p>
@@ -307,31 +314,18 @@ PAYMENT_HTML = """
     async function startPayment() {
       const status = document.getElementById('status');
       const phoneInput = document.getElementById('phone').value;
-      
-      if (!phoneInput) {
-        status.innerText = "Please enter your phone number.";
-        return;
-      }
-
+      if (!phoneInput) { status.innerText = "Please enter your phone number."; return; }
       status.innerText = "Initializing payment...";
-
       try {
         const res = await fetch('/api/subscription/pay_direct', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phone: phoneInput })
         });
-        
         const data = await res.json();
-        
-        if (data.checkout_url) {
-          window.location.href = data.checkout_url;
-        } else {
-          status.innerText = "Error: " + (data.error || "Unknown error");
-        }
-      } catch (e) {
-        status.innerText = "Network Error: " + e;
-      }
+        if (data.checkout_url) { window.location.href = data.checkout_url; } 
+        else { status.innerText = "Error: " + (data.error || "Unknown error"); }
+      } catch (e) { status.innerText = "Network Error: " + e; }
     }
   </script>
 </body>
@@ -339,8 +333,7 @@ PAYMENT_HTML = """
 """
 
 @app.route("/payment")
-def payment_page():
-    return render_template_string(PAYMENT_HTML)
+def payment_page(): return render_template_string(PAYMENT_HTML)
 
 def parse_caption(caption):
     if not caption: return None
@@ -597,17 +590,16 @@ async function toggleUser(phone) {
 @app.route("/admin")
 def admin_page(): return render_template_string(ADMIN_HTML)
 
-try:
-    async def _start_client():
-        await client.start()
-        print("✅ TG Logged in")
-    tg_loop.run_until_complete(_start_client())
-    load_users()
-    load_settings()
-    load_codes()
-except Exception as e: print(f"❌ Startup error: {e}")
-
+# --- STARTUP LOGIC ---
 if __name__ == "__main__":
+    try:
+        asyncio.run(client.start())
+        print("✅ TG Logged in")
+        load_users()
+        load_settings()
+        load_codes()
+    except Exception as e:
+        print(f"❌ Startup error: {e}")
+        
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
