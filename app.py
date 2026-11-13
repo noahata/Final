@@ -225,42 +225,28 @@ def redeem_code():
     save_users(); save_codes()
     return jsonify({"ok": True, "message": f"Successfully added {days} days!"})
 
-# --- NEW WEB PAYMENT ROUTE (Phone Number Based) ---
-@app.route("/api/subscription/initialize_web", methods=["POST"])
-def subscription_initialize_web():
+# --- ZERO AUTH PAYMENT FLOW ---
+@app.route("/api/subscription/pay_direct", methods=["POST"])
+def pay_direct():
     data = request.get_json() or {}
-    phone = data.get("phone", "").strip()
-    
-    # Clean phone number to match DB format (e.g., 0912345678 -> +251912345678)
-    if phone.startswith("0"): phone = "+251" + phone[1:]
-    elif not phone.startswith("+"): phone = "+251" + phone
-
-    user = USERS.get(phone)
-    if not user:
-        return jsonify({"error": "Phone number not found. Please register in the app first."}), 404
-
-    import requests as http
-    pay = user.setdefault("payment", {})
-    amount = pay.get("price_etb", SETTINGS["default_price_etb"])
-    tx_ref = f"d2ai-{phone.replace('+','')}-{secrets.token_hex(6)}"
+    amount = SETTINGS.get("default_price_etb", 100)
+    tx_ref = f"d2ai-guest-{secrets.token_hex(6)}"
     
     payload = {
         "amount": str(amount), "currency": "ETB",
-        "email": f"{phone.replace('+','')}@d2ai.app",
-        "first_name": user.get("name") or "User",
-        "last_name": phone, "phone_number": phone,
+        "email": "guest@d2ai.app",
+        "first_name": "Guest", "last_name": "User", "phone_number": "0912345678",
         "tx_ref": tx_ref,
         "callback_url": f"{APP_BASE_URL}/verify",
         "return_url": f"{APP_BASE_URL}/payment/success?tx_ref={tx_ref}",
         "customization": {"title": "D² Ai Subscription", "description": f"{amount} ETB"},
     }
     
+    import requests as http
     r = http.post(f"{CHAPA_BASE_URL}/transaction/initialize", json=payload, headers={"Authorization": f"Bearer {CHAPA_SECRET_KEY}", "Content-Type": "application/json"}, timeout=20)
     if r.status_code not in (200, 201): return jsonify({"error": "chapa init failed", "detail": r.text}), 500
         
     data = r.json()
-    pay["pending_tx_ref"] = tx_ref
-    save_users()
     return jsonify({"checkout_url": data["data"]["checkout_url"], "tx_ref": tx_ref, "amount": amount})
 
 @app.route("/payment/success")
@@ -278,7 +264,7 @@ def payment_success():
     </body></html>
     """
 
-# --- THE PAYMENT WEB PAGE ---
+# --- THE PAYMENT WEB PAGE (NO LOGIN) ---
 PAYMENT_HTML = """
 <!DOCTYPE html>
 <html>
@@ -289,8 +275,7 @@ PAYMENT_HTML = """
   body { font-family: system-ui, sans-serif; text-align: center; padding: 40px 20px; background: #0F172A; color: white; }
   .card { background: #1E293B; padding: 30px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid #334155; }
   h1 { color: #3b82f6; }
-  input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; font-size: 16px; }
-  button { background: #10b981; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 8px; margin-top: 10px; width: 100%; cursor: pointer; font-weight: bold; }
+  button { background: #10b981; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 8px; margin-top: 20px; width: 100%; cursor: pointer; font-weight: bold; }
   button:hover { background: #059669; }
   #status { color: #ef4444; margin-top: 15px; font-size: 14px; }
 </style>
@@ -300,8 +285,6 @@ PAYMENT_HTML = """
     <h1>Subscribe to D² Ai</h1>
     <p>Get unlimited access to all premium videos and the Offline AI Tutor.</p>
     <h2>100 ETB / 30 Days</h2>
-    
-    <input type="tel" id="phone" placeholder="Enter your phone number (e.g., 0912345678)">
     <button onclick="startPayment()">Pay with Chapa</button>
     <p id="status"></p>
   </div>
@@ -309,20 +292,12 @@ PAYMENT_HTML = """
   <script>
     async function startPayment() {
       const status = document.getElementById('status');
-      const phone = document.getElementById('phone').value;
-      
-      if (!phone) {
-        status.innerText = "Please enter your phone number.";
-        return;
-      }
-
       status.innerText = "Initializing payment...";
 
       try {
-        const res = await fetch('/api/subscription/initialize_web', {
+        const res = await fetch('/api/subscription/pay_direct', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phone })
+          headers: { 'Content-Type': 'application/json' }
         });
         
         const data = await res.json();
@@ -344,7 +319,6 @@ PAYMENT_HTML = """
 @app.route("/payment")
 def payment_page():
     return render_template_string(PAYMENT_HTML)
-# ------------------------------------------
 
 def parse_caption(caption):
     if not caption: return None
@@ -614,7 +588,3 @@ except Exception as e: print(f"❌ Startup error: {e}")
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
-
-
