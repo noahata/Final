@@ -43,7 +43,7 @@ def make_token():
 
 USERS = {}
 SESSIONS = {}
-ACTIVATION_CODES = {} # { "CODE123": { "days": 30, "used_by": None } }
+ACTIVATION_CODES = {}
 USERS_MSG_ID = None
 SETTINGS_MSG_ID = None
 CODES_MSG_ID = None
@@ -89,7 +89,6 @@ def load_from_tg(marker, dict_to_fill, id_type):
                 dict_to_fill.update(json.loads(json_part))
                 print(f"✅ Loaded {id_type}")
                 return
-        print(f"ℹ️ No {id_type} DB yet")
     except Exception as e: print(f"⚠️ load {id_type} failed: {e}")
 
 def save_users(): save_to_tg(USERS_MSG_MARKER, USERS, "users")
@@ -201,18 +200,15 @@ def subscription_status():
 @_require_active_subscription
 def check_ai_access(): return jsonify({"allowed": True})
 
-# --- NEW: ACTIVATION CODE REDEMPTION ---
 @app.route("/api/subscription/redeem", methods=["POST"])
 @require_auth
 def redeem_code():
     data = request.get_json() or {}
     code = data.get("code", "").strip().upper()
     if not code: return jsonify({"error": "Code required"}), 400
-    
     code_data = ACTIVATION_CODES.get(code)
     if not code_data: return jsonify({"error": "Invalid code"}), 404
     if code_data.get("used_by"): return jsonify({"error": "Code already used"}), 400
-    
     days = code_data.get("days", 30)
     now = datetime.utcnow()
     pay = request.user.setdefault("payment", {})
@@ -223,29 +219,18 @@ def redeem_code():
             prev = datetime.fromisoformat(until_str)
             if prev > now: base = prev
         except Exception: pass
-        
-    pay.update({
-        "mode": "paid", "status": "active",
-        "until": (base + timedelta(days=days)).isoformat(),
-        "last_payment_ref": f"CODE-{code}", "last_payment_at": now.isoformat()
-    })
-    
+    pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat(), "last_payment_ref": f"CODE-{code}", "last_payment_at": now.isoformat()})
     ACTIVATION_CODES[code]["used_by"] = request.phone
     ACTIVATION_CODES[code]["used_at"] = now.isoformat()
-    save_users()
-    save_codes()
-    
+    save_users(); save_codes()
     return jsonify({"ok": True, "message": f"Successfully added {days} days!"})
 
 @app.route("/payment/success")
 def payment_success():
-    tx_ref = request.args.get("tx_ref", "")
-    # In a real app, you'd verify the tx_ref here.
-    # For the manual flow, we generate a code and show it to the user.
+    tx_ref = request.args.get("tx_ref", "UNKNOWN")
     new_code = f"D2AI-{secrets.token_hex(4).upper()}"
-    ACTIVATION_CODES[new_code] = {"days": SETTINGS["default_period_days"], "used_by": None}
+    ACTIVATION_CODES[new_code] = {"days": SETTINGS["default_period_days"], "used_by": None, "tx_ref": tx_ref}
     save_codes()
-    
     return f"""
     <html><body style="font-family:sans-serif;text-align:center;padding:50px;background:#0F172A;color:white;">
     <h1 style="color:#10B981;">✅ Payment Successful!</h1>
@@ -366,8 +351,7 @@ def thumb(message_id):
 
 @app.route("/admin/users")
 @require_admin
-def admin_users():
-    return jsonify([{"phone": u["phone"], "name": u.get("name"), "is_active": u.get("is_active", True)} for u in USERS.values()])
+def admin_users(): return jsonify([{"phone": u["phone"], "name": u.get("name"), "is_active": u.get("is_active", True)} for u in USERS.values()])
 
 @app.route("/admin/toggle-user/<phone>", methods=["POST"])
 @require_admin
