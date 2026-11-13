@@ -283,14 +283,12 @@ def api_grade(grade_name):
         if g["grade"] == grade_name: return jsonify(g)
     return jsonify({"error": "not found"}), 404
 
-# --- FIXED STREAMING (No 502 Error) ---
 @app.route("/stream/<int:message_id>")
 @require_auth
 def stream(message_id):
     msg = run(client.get_messages(CHANNEL, ids=message_id))
     info = get_msg_file_info(msg)
     if not info: return "Not found", 404
-    
     file_size, mime = info["size"], info["mime"]
     media = msg.video or msg.document
     range_header = request.headers.get("Range")
@@ -303,12 +301,8 @@ def stream(message_id):
             end = int(e) if e else file_size - 1
             end = min(end, file_size - 1); status = 206
     length = end - start + 1
-    
     def generate():
-        # We yield small chunks directly to avoid crashing Render's RAM
-        for chunk in client.iter_download(media, offset=start, limit=length, chunk_size=524288):
-            yield chunk
-            
+        for chunk in client.iter_download(media, offset=start, limit=length, chunk_size=524288): yield chunk
     return Response(generate(), status=status, headers={"Content-Type": mime, "Accept-Ranges": "bytes", "Content-Length": str(length), "Content-Range": f"bytes {start}-{end}/{file_size}", "Cache-Control": "public, max-age=3600"})
 
 @app.route("/download/<int:message_id>")
@@ -341,7 +335,6 @@ def thumb(message_id):
     buf = io.BytesIO(); run(client.download_media(msg, file=buf, thumb=-1)); buf.seek(0)
     return Response(buf.read(), mimetype="image/jpeg")
 
-# --- EXPANDED ADMIN PANEL ---
 @app.route("/admin/users")
 @require_admin
 def admin_users(): return jsonify([{"phone": u["phone"], "name": u.get("name"), "is_active": u.get("is_active", True), "payment": u.get("payment", {})} for u in USERS.values()])
