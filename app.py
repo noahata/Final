@@ -17,13 +17,11 @@ API_HASH         = os.environ["API_HASH"]
 SESSION          = os.environ["TG_SESSION"]
 CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
-CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY", "")
-CHAPA_BASE_URL   = "https://api.chapa.co/v1"
-APP_BASE_URL     = os.environ.get("APP_BASE_URL", "https://final-k4m9.onrender.com")
 
 USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
-SETTINGS_MSG_MARKER = "D2AI_SETTINGS_v1"
-CODES_MSG_MARKER    = "D2AI_CODES_v1"
+SETTINGS_MSG_MARKER = "D2AI_SETTINGS_V1"
+CODES_MSG_MARKER    = "D2AI_CODES_V1"
+REWARDS_MSG_MARKER  = "D2AI_REWARDS_V1"
 
 app = Flask(__name__)
 CORS(app)
@@ -33,42 +31,40 @@ client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 USERS = {}
 SESSIONS = {}
 ACTIVATION_CODES = {}
+REWARDS = {} # { "user_phone": { "status": "pending", "proof": "..." } }
 USERS_MSG_ID = None
 SETTINGS_MSG_ID = None
 CODES_MSG_ID = None
-
-# --- THREAD-SAFE LOOP RUNNER (FIXES STREAMING CRASH) ---
-def run(coro):
-    try:
-        loop = asyncio.get_running_loop()
-        # If a loop is running, we must use run_coroutine_threadsafe
-        return asyncio.run_coroutine_threadsafe(coro, loop).result()
-    except RuntimeError:
-        # If no loop is running (Flask thread), create a new one
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        try:
-            return new_loop.run_until_complete(coro)
-        finally:
-            new_loop.close()
-# -------------------------------------------------------
-
-def hash_password(pw):
-    return hashlib.sha256(pw.encode()).hexdigest()
-
-def make_token():
-    return secrets.token_urlsafe(48)
+REWARDS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_price_etb": 100,
     "default_period_days": 30,
     "default_trial_days": 3,
     "payments_enabled_globally": True,
+    "payment_phone": "0952350836",
+    "payment_name": "Noah",
+    "support_telegram": "https://t.me/YourSupportUsername" 
 }
 SETTINGS = dict(DEFAULT_SETTINGS)
 
+def run(coro):
+    try:
+        loop = asyncio.get_running_loop()
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
+    except RuntimeError:
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+
+def hash_password(pw): return hashlib.sha256(pw.encode()).hexdigest()
+def make_token(): return secrets.token_urlsafe(48)
+
 def save_to_tg(marker, data, msg_id_holder):
-    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID
+    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID
     payload = marker + "\n" + json.dumps(data, ensure_ascii=False)
     try:
         if msg_id_holder == "users":
@@ -83,10 +79,14 @@ def save_to_tg(marker, data, msg_id_holder):
             if CODES_MSG_ID: run(client.edit_message(CHANNEL, CODES_MSG_ID, payload))
             else:
                 msg = run(client.send_message(CHANNEL, payload)); CODES_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
+        elif msg_id_holder == "rewards":
+            if REWARDS_MSG_ID: run(client.edit_message(CHANNEL, REWARDS_MSG_ID, payload))
+            else:
+                msg = run(client.send_message(CHANNEL, payload)); REWARDS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
     except Exception as e: print(f"⚠️ save {msg_id_holder} failed: {e}")
 
 def load_from_tg(marker, dict_to_fill, id_type):
-    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID
+    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID
     try:
         msgs = run(client.get_messages(CHANNEL, limit=200))
         for m in msgs:
@@ -94,6 +94,7 @@ def load_from_tg(marker, dict_to_fill, id_type):
                 if id_type == "users": USERS_MSG_ID = m.id
                 elif id_type == "settings": SETTINGS_MSG_ID = m.id
                 elif id_type == "codes": CODES_MSG_ID = m.id
+                elif id_type == "rewards": REWARDS_MSG_ID = m.id
                 
                 _, _, json_part = m.message.partition("\n")
                 dict_to_fill.clear()
@@ -105,10 +106,12 @@ def load_from_tg(marker, dict_to_fill, id_type):
 def save_users(): save_to_tg(USERS_MSG_MARKER, USERS, "users")
 def save_settings(): save_to_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
 def save_codes(): save_to_tg(CODES_MSG_MARKER, ACTIVATION_CODES, "codes")
+def save_rewards(): save_to_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
 
 def load_users(): load_from_tg(USERS_MSG_MARKER, USERS, "users")
 def load_settings(): load_from_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
 def load_codes(): load_from_tg(CODES_MSG_MARKER, ACTIVATION_CODES, "codes")
+def load_rewards(): load_from_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
 
 def require_auth(f):
     @wraps(f)
@@ -236,170 +239,32 @@ def redeem_code():
     save_users(); save_codes()
     return jsonify({"ok": True, "message": f"Successfully added {days} days!"})
 
-@app.route("/api/subscription/pay_direct", methods=["POST"])
-def pay_direct():
-    try:
-        data = request.get_json() or {}
-        phone = data.get("phone", "0912345678").strip()
-        
-        if phone.startswith("0"): phone = "+251" + phone[1:]
-        elif not phone.startswith("+"): phone = "+251" + phone
-
-        amount = SETTINGS.get("default_price_etb", 100)
-        tx_ref = f"d2ai-guest-{secrets.token_hex(6)}"
-        
-        payload = {
-            "amount": str(amount), "currency": "ETB",
-            "email": "test@chapa.co",
-            "first_name": "Guest", "last_name": "User", "phone_number": phone,
-            "tx_ref": tx_ref,
-            "callback_url": f"{APP_BASE_URL}/verify",
-            "return_url": f"{APP_BASE_URL}/payment/success?tx_ref={tx_ref}",
-            "customization": {"title": "D² Ai Subscription", "description": f"{amount} ETB"},
-        }
-        
-        import requests as http
-        r = http.post(f"{CHAPA_BASE_URL}/transaction/initialize", json=payload, headers={"Authorization": f"Bearer {CHAPA_SECRET_KEY}", "Content-Type": "application/json"}, timeout=20)
-        
-        if r.status_code not in (200, 201): 
-            return jsonify({"error": "chapa init failed", "detail": r.text}), 500
-            
-        response_data = r.json()
-        return jsonify({"checkout_url": response_data["data"]["checkout_url"], "tx_ref": tx_ref, "amount": amount})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/payment/success")
-def payment_success():
-    tx_ref = request.args.get("tx_ref", "UNKNOWN")
-    new_code = f"D2AI-{secrets.token_hex(4).upper()}"
-    ACTIVATION_CODES[new_code] = {"days": SETTINGS["default_period_days"], "used_by": None, "tx_ref": tx_ref}
-    save_codes()
-    return f"""
-    <html><body style="font-family:sans-serif;text-align:center;padding:50px;background:#0F172A;color:white;">
-    <h1 style="color:#10B981;">✅ Payment Successful!</h1>
-    <p>Your Activation Code is:</p>
-    <h2 style="background:#1E293B;padding:15px;border-radius:10px;letter-spacing:2px;">{new_code}</h2>
-    <p>Copy this code and enter it in the D² Ai app to unlock your account.</p>
-    </body></html>
-    """
-
-PAYMENT_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>D² Ai - Payment</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  body { font-family: system-ui, sans-serif; text-align: center; padding: 40px 20px; background: #0F172A; color: white; }
-  .card { background: #1E293B; padding: 30px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border: 1px solid #334155; }
-  h1 { color: #3b82f6; }
-  input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; font-size: 16px; }
-  button { background: #10b981; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 8px; margin-top: 10px; width: 100%; cursor: pointer; font-weight: bold; }
-  button:hover { background: #059669; }
-  #status { color: #ef4444; margin-top: 15px; font-size: 14px; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>Subscribe to D² Ai</h1>
-    <p>Get unlimited access to all premium videos and the Offline AI Tutor.</p>
-    <h2>100 ETB / 30 Days</h2>
-    <input type="tel" id="phone" placeholder="Enter phone (e.g., 0912345678)">
-    <button onclick="startPayment()">Pay with Chapa</button>
-    <p id="status"></p>
-  </div>
-
-  <script>
-    async function startPayment() {
-      const status = document.getElementById('status');
-      const phoneInput = document.getElementById('phone').value;
-      if (!phoneInput) { status.innerText = "Please enter your phone number."; return; }
-      status.innerText = "Initializing payment...";
-      try {
-        const res = await fetch('/api/subscription/pay_direct', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: phoneInput })
-        });
-        const data = await res.json();
-        if (data.checkout_url) { window.location.href = data.checkout_url; } 
-        else { status.innerText = "Error: " + (data.error || "Unknown error"); }
-      } catch (e) { status.innerText = "Network Error: " + e; }
+# --- REWARD SYSTEM ---
+@app.route("/api/reward", methods=["POST"])
+@require_auth
+def submit_reward():
+    data = request.get_json() or {}
+    proof = data.get("proof", "").strip()
+    if not proof: return jsonify({"error": "Proof link required"}), 400
+    
+    REWARDS[request.phone] = {
+        "phone": request.phone,
+        "proof": proof,
+        "status": "pending",
+        "submitted_at": datetime.utcnow().isoformat()
     }
-  </script>
-</body>
-</html>
-"""
+    save_rewards()
+    return jsonify({"ok": True, "message": "Proof submitted! Admin will review it."})
 
-@app.route("/payment")
-def payment_page(): return render_template_string(PAYMENT_HTML)
+@app.route("/api/support")
+def get_support():
+    return jsonify({
+        "telegram": SETTINGS.get("support_telegram", ""),
+        "payment_phone": SETTINGS.get("payment_phone", "0952350836"),
+        "payment_name": SETTINGS.get("payment_name", "Noah")
+    })
 
-def parse_caption(caption):
-    if not caption: return None
-    parts = [p.strip() for p in caption.split("|", 3)]
-    if len(parts) == 4: return {"subject": parts[0], "grade": parts[1], "chapter": parts[2], "topic": parts[3]}
-    return {"subject": "General", "grade": "General", "chapter": "Uncategorized", "topic": caption}
-
-def build_structure():
-    msgs = run(client.get_messages(CHANNEL, limit=1000))
-    grades = {}
-    for m in msgs:
-        info = get_msg_file_info(m)
-        if not info: continue
-        if m.message and (m.message.startswith(USERS_MSG_MARKER) or m.message.startswith(SETTINGS_MSG_MARKER) or m.message.startswith(CODES_MSG_MARKER)): continue
-        meta = parse_caption(m.message or "")
-        if not meta: continue
-        g_name, sbj, ch = meta["grade"], meta["subject"], meta["chapter"]
-        if g_name not in grades: grades[g_name] = {"grade": g_name, "subjects": {}}
-        if sbj not in grades[g_name]["subjects"]: grades[g_name]["subjects"][sbj] = {"subject": sbj, "chapters": {}}
-        if ch not in grades[g_name]["subjects"][sbj]["chapters"]: grades[g_name]["subjects"][sbj]["chapters"][ch] = {"chapter": ch, "videos": []}
-        grades[g_name]["subjects"][sbj]["chapters"][ch]["videos"].append({
-            "id": m.id, "tg_msg_id": m.id, "title": meta["topic"], "playlist": sbj, "grade": g_name, "chapter": ch, "subject": sbj,
-            "stream_url": f"/stream/{m.id}", "download_url": f"/download/{m.id}", "thumb_url": f"/thumb/{m.id}",
-        })
-    result = []
-    for g in grades.values():
-        g["subjects"] = list(g["subjects"].values())
-        for s in g["subjects"]:
-            s["chapters"] = list(s["chapters"].values())
-            for c in s["chapters"]: c["videos"].sort(key=lambda v: v["tg_msg_id"])
-        result.append(g)
-    return result
-
-@app.route("/api/playlists")
-@require_auth
-def api_playlists(): return jsonify([{"title": g["grade"], "subject_count": len(g["subjects"])} for g in build_structure()])
-
-@app.route("/api/grade/<string:grade_name>")
-@require_auth
-def api_grade(grade_name):
-    for g in build_structure():
-        if g["grade"] == grade_name: return jsonify(g)
-    return jsonify({"error": "not found"}), 404
-
-@app.route("/stream/<int:message_id>")
-@require_auth
-def stream(message_id):
-    msg = run(client.get_messages(CHANNEL, ids=message_id))
-    info = get_msg_file_info(msg)
-    if not info: return "Not found", 404
-    file_size, mime = info["size"], info["mime"]
-    media = msg.video or msg.document
-    range_header = request.headers.get("Range")
-    start, end, status = 0, file_size - 1, 200
-    if range_header:
-        units, _, rng = range_header.partition("=")
-        if units.strip() == "bytes":
-            s, _, e = rng.partition("-")
-            start = int(s) if s else 0
-            end = int(e) if e else file_size - 1
-            end = min(end, file_size - 1); status = 206
-    length = end - start + 1
-    def generate():
-        for chunk in client.iter_download(media, offset=start, limit=length, chunk_size=524288): yield chunk
-    return Response(generate(), status=status, headers={"Content-Type": mime, "Accept-Ranges": "bytes", "Content-Length": str(length), "Content-Range": f"bytes {start}-{end}/{file_size}", "Cache-Control": "public, max-age=3600"})
-
+# --- DOWNLOAD ONLY (NO STREAMING) ---
 @app.route("/download/<int:message_id>")
 @require_auth
 def download(message_id):
@@ -430,6 +295,49 @@ def thumb(message_id):
     buf = io.BytesIO(); run(client.download_media(msg, file=buf, thumb=-1)); buf.seek(0)
     return Response(buf.read(), mimetype="image/jpeg")
 
+def parse_caption(caption):
+    if not caption: return None
+    parts = [p.strip() for p in caption.split("|", 3)]
+    if len(parts) == 4: return {"subject": parts[0], "grade": parts[1], "chapter": parts[2], "topic": parts[3]}
+    return {"subject": "General", "grade": "General", "chapter": "Uncategorized", "topic": caption}
+
+def build_structure():
+    msgs = run(client.get_messages(CHANNEL, limit=1000))
+    grades = {}
+    for m in msgs:
+        info = get_msg_file_info(m)
+        if not info: continue
+        if m.message and (m.message.startswith(USERS_MSG_MARKER) or m.message.startswith(SETTINGS_MSG_MARKER) or m.message.startswith(CODES_MSG_MARKER) or m.message.startswith(REWARDS_MSG_MARKER)): continue
+        meta = parse_caption(m.message or "")
+        if not meta: continue
+        g_name, sbj, ch = meta["grade"], meta["subject"], meta["chapter"]
+        if g_name not in grades: grades[g_name] = {"grade": g_name, "subjects": {}}
+        if sbj not in grades[g_name]["subjects"]: grades[g_name]["subjects"][sbj] = {"subject": sbj, "chapters": {}}
+        if ch not in grades[g_name]["subjects"][sbj]["chapters"]: grades[g_name]["subjects"][sbj]["chapters"][ch] = {"chapter": ch, "videos": []}
+        grades[g_name]["subjects"][sbj]["chapters"][ch]["videos"].append({
+            "id": m.id, "tg_msg_id": m.id, "title": meta["topic"], "playlist": sbj, "grade": g_name, "chapter": ch, "subject": sbj,
+            "download_url": f"/download/{m.id}", "thumb_url": f"/thumb/{m.id}",
+        })
+    result = []
+    for g in grades.values():
+        g["subjects"] = list(g["subjects"].values())
+        for s in g["subjects"]:
+            s["chapters"] = list(s["chapters"].values())
+            for c in s["chapters"]: c["videos"].sort(key=lambda v: v["tg_msg_id"])
+        result.append(g)
+    return result
+
+@app.route("/api/playlists")
+@require_auth
+def api_playlists(): return jsonify([{"title": g["grade"], "subject_count": len(g["subjects"])} for g in build_structure()])
+
+@app.route("/api/grade/<string:grade_name>")
+@require_auth
+def api_grade(grade_name):
+    for g in build_structure():
+        if g["grade"] == grade_name: return jsonify(g)
+    return jsonify({"error": "not found"}), 404
+
 @app.route("/admin/users")
 @require_admin
 def admin_users(): return jsonify([{"phone": u["phone"], "name": u.get("name"), "is_active": u.get("is_active", True), "payment": u.get("payment", {})} for u in USERS.values()])
@@ -458,21 +366,41 @@ def admin_generate_code():
 def admin_settings():
     if request.method == "POST":
         data = request.get_json() or {}
-        for k in ["default_price_etb", "default_period_days", "default_trial_days", "payments_enabled_globally"]:
+        for k in ["default_price_etb", "default_period_days", "default_trial_days", "payments_enabled_globally", "payment_phone", "payment_name", "support_telegram"]:
             if k in data: SETTINGS[k] = data[k]
         save_settings()
         return jsonify({"ok": True, "settings": SETTINGS})
     return jsonify(SETTINGS)
 
-@app.route("/admin/structure")
+@app.route("/admin/rewards")
 @require_admin
-def admin_structure(): return jsonify(build_structure())
+def admin_rewards():
+    return jsonify(list(REWARDS.values()))
 
-@app.route("/admin/video/<int:msg_id>", methods=["DELETE"])
+@app.route("/admin/reward/<phone>/approve", methods=["POST"])
 @require_admin
-def admin_delete_video(msg_id):
-    run(client.delete_messages(CHANNEL, [msg_id]))
-    return jsonify({"ok": True})
+def admin_approve_reward(phone):
+    if phone not in REWARDS: return jsonify({"error": "reward not found"}), 404
+    user = USERS.get(phone)
+    if not user: return jsonify({"error": "user not found"}), 404
+    
+    # Grant 30 days
+    now = datetime.utcnow()
+    pay = user.setdefault("payment", {})
+    base = now
+    until_str = pay.get("until")
+    if until_str:
+        try:
+            prev = datetime.fromisoformat(until_str)
+            if prev > now: base = prev
+        except Exception: pass
+        
+    pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=30)).isoformat(), "last_payment_ref": "REWARD-50-LIKES", "last_payment_at": now.isoformat()})
+    
+    del REWARDS[phone]
+    save_users()
+    save_rewards()
+    return jsonify({"ok": True, "message": "Reward approved! 30 days added."})
 
 ADMIN_HTML = """
 <!DOCTYPE html>
@@ -510,6 +438,9 @@ ADMIN_HTML = """
       <h2>⚙️ Global Settings</h2>
       <label>Price (ETB)</label><input type="number" id="defPrice" value="100">
       <label>Trial Days</label><input type="number" id="defTrial" value="3">
+      <label>Payment Phone</label><input type="text" id="payPhone" value="0952350836">
+      <label>Payment Name</label><input type="text" id="payName" value="Noah">
+      <label>Support Telegram</label><input type="text" id="supportTg" value="https://t.me/YourSupportUsername">
       <button onclick="saveSettings()">Save Settings</button>
     </div>
 
@@ -519,6 +450,11 @@ ADMIN_HTML = """
       <input type="number" id="codeDays" value="30">
       <button onclick="genCode()">Generate Code</button>
       <div id="codeResult" style="margin-top:10px; font-weight:bold; color:#10B981;"></div>
+    </div>
+
+    <div class="card">
+      <h2>🏆 Rewards (50 Likes)</h2>
+      <div id="rewardsList"></div>
     </div>
 
     <div class="card">
@@ -539,15 +475,25 @@ async function loadPanel() {
   const s = await r.json();
   $('defPrice').value = s.default_price_etb;
   $('defTrial').value = s.default_trial_days;
+  $('payPhone').value = s.payment_phone || "0952350836";
+  $('payName').value = s.payment_name || "Noah";
+  $('supportTg').value = s.support_telegram || "";
   $('panel').style.display = 'block';
   loadUsers();
+  loadRewards();
 }
 
 async function saveSettings() {
   await fetch('/admin/settings', {
     method: 'POST',
     headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ default_price_etb: parseInt($('defPrice').value), default_trial_days: parseInt($('defTrial').value) })
+    body: JSON.stringify({ 
+      default_price_etb: parseInt($('defPrice').value), 
+      default_trial_days: parseInt($('defTrial').value),
+      payment_phone: $('payPhone').value,
+      payment_name: $('payName').value,
+      support_telegram: $('supportTg').value
+    })
   });
   alert('Settings saved!');
 }
@@ -561,6 +507,27 @@ async function genCode() {
   });
   const data = await r.json();
   $('codeResult').innerText = `Code: ${data.code} (Valid for ${days} days)`;
+}
+
+async function loadRewards() {
+  $('rewardsList').innerHTML = 'Loading...';
+  const r = await fetch('/admin/rewards', { headers: { 'X-Admin-Key': key() } });
+  const rewards = await r.json();
+  let html = '';
+  rewards.forEach(rw => {
+    html += `
+      <div class="row">
+        <div><b>${rw.phone}</b><br><span style="color:#94A3B8;font-size:12px;">Proof: ${rw.proof}</span></div>
+        <div><button class="success" onclick="approveReward('${rw.phone}')">Approve</button></div>
+      </div>`;
+  });
+  $('rewardsList').innerHTML = html || 'No pending rewards.';
+}
+
+async function approveReward(phone) {
+  await fetch('/admin/reward/' + phone + '/approve', { method: 'POST', headers: { 'X-Admin-Key': key() } });
+  loadRewards();
+  loadUsers();
 }
 
 async function loadUsers() {
@@ -590,7 +557,6 @@ async function toggleUser(phone) {
 @app.route("/admin")
 def admin_page(): return render_template_string(ADMIN_HTML)
 
-# --- STARTUP LOGIC ---
 if __name__ == "__main__":
     try:
         asyncio.run(client.start())
@@ -598,6 +564,7 @@ if __name__ == "__main__":
         load_users()
         load_settings()
         load_codes()
+        load_rewards()
     except Exception as e:
         print(f"❌ Startup error: {e}")
         
