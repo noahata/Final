@@ -19,9 +19,9 @@ CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
 USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
-SETTINGS_MSG_MARKER = "D2AI_SETTINGS_V1"
-CODES_MSG_MARKER    = "D2AI_CODES_V1"
-REWARDS_MSG_MARKER  = "D2AI_REWARDS_V1"
+SETTINGS_MSG_MARKER = "D2AI_SETTINGS_v1"
+CODES_MSG_MARKER    = "D2AI_CODES_v1"
+REWARDS_MSG_MARKER  = "D2AI_REWARDS_v1"
 
 app = Flask(__name__)
 CORS(app)
@@ -31,7 +31,7 @@ client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 USERS = {}
 SESSIONS = {}
 ACTIVATION_CODES = {}
-REWARDS = {} # { "user_phone": { "status": "pending", "proof": "..." } }
+REWARDS = {} # { "phone": { "status": "pending", "proof": "link" } }
 USERS_MSG_ID = None
 SETTINGS_MSG_ID = None
 CODES_MSG_ID = None
@@ -44,7 +44,7 @@ DEFAULT_SETTINGS = {
     "payments_enabled_globally": True,
     "payment_phone": "0952350836",
     "payment_name": "Noah",
-    "support_telegram": "https://t.me/YourSupportUsername" 
+    "support_telegram": "https://t.me/Ace_spy" 
 }
 SETTINGS = dict(DEFAULT_SETTINGS)
 
@@ -155,12 +155,6 @@ def _require_active_subscription(f):
         return f(*args, **kwargs)
     return wrapper
 
-def get_msg_file_info(msg):
-    if not msg: return None
-    media = msg.video or msg.document
-    if not media: return None
-    return {"size": getattr(media, "size", 0) or 0, "mime": getattr(media, "mime_type", None) or "video/mp4", "duration": getattr(media, "duration", 0) or 0, "thumbs": getattr(media, "thumbs", None)}
-
 @app.route("/auth/register", methods=["POST"])
 def register():
     data = request.get_json() or {}
@@ -207,7 +201,13 @@ def login():
 def subscription_status():
     state = _user_subscription_state(request.user)
     pay = request.user.get("payment", {})
-    return jsonify({"payments_enabled_globally": SETTINGS.get("payments_enabled_globally", True), "mode": pay.get("mode", "free"), "price_etb": state.get("price_etb", 0), "period_days": pay.get("period_days", 30), "subscription": state})
+    return jsonify({
+        "payments_enabled_globally": SETTINGS.get("payments_enabled_globally", True), 
+        "mode": pay.get("mode", "free"), 
+        "price_etb": state.get("price_etb", 0), 
+        "period_days": pay.get("period_days", 30), 
+        "subscription": state
+    })
 
 @app.route("/api/ai/check", methods=["GET"])
 @require_auth
@@ -233,26 +233,23 @@ def redeem_code():
             prev = datetime.fromisoformat(until_str)
             if prev > now: base = prev
         except Exception: pass
-    pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat(), "last_payment_ref": f"CODE-{code}", "last_payment_at": now.isoformat()})
+        
+    new_until = base + timedelta(days=days)
+    pay.update({"mode": "paid", "status": "active", "until": new_until.isoformat(), "last_payment_ref": f"CODE-{code}", "last_payment_at": now.isoformat()})
     ACTIVATION_CODES[code]["used_by"] = request.phone
     ACTIVATION_CODES[code]["used_at"] = now.isoformat()
     save_users(); save_codes()
-    return jsonify({"ok": True, "message": f"Successfully added {days} days!"})
+    
+    days_left = (new_until - now).days
+    return jsonify({"ok": True, "message": f"Successfully activated! You have {days_left} days of Premium left."})
 
-# --- REWARD SYSTEM ---
 @app.route("/api/reward", methods=["POST"])
 @require_auth
 def submit_reward():
     data = request.get_json() or {}
     proof = data.get("proof", "").strip()
     if not proof: return jsonify({"error": "Proof link required"}), 400
-    
-    REWARDS[request.phone] = {
-        "phone": request.phone,
-        "proof": proof,
-        "status": "pending",
-        "submitted_at": datetime.utcnow().isoformat()
-    }
+    REWARDS[request.phone] = {"phone": request.phone, "proof": proof, "status": "pending", "submitted_at": datetime.utcnow().isoformat()}
     save_rewards()
     return jsonify({"ok": True, "message": "Proof submitted! Admin will review it."})
 
@@ -263,80 +260,6 @@ def get_support():
         "payment_phone": SETTINGS.get("payment_phone", "0952350836"),
         "payment_name": SETTINGS.get("payment_name", "Noah")
     })
-
-# --- DOWNLOAD ONLY (NO STREAMING) ---
-@app.route("/download/<int:message_id>")
-@require_auth
-def download(message_id):
-    msg = run(client.get_messages(CHANNEL, ids=message_id))
-    if not msg: return "Not found", 404
-    file_size, mime, media = 0, "video/mp4", None
-    if msg.video: media, file_size, mime = msg.video, msg.video.size, msg.video.mime_type or "video/mp4"
-    elif msg.document: media, file_size, mime = msg.document, msg.document.size, msg.document.mime_type or "video/mp4"
-    else: return "Not a video file", 404
-    def generate():
-        try:
-            for chunk in client.iter_download(media, chunk_size=1048576): yield chunk
-        except Exception: return
-    return Response(generate(), headers={"Content-Type": mime, "Content-Length": str(file_size), "Content-Disposition": f'attachment; filename="{message_id}.mp4"', "Accept-Ranges": "bytes"})
-
-@app.route("/thumb/<int:message_id>")
-@require_auth
-def thumb(message_id):
-    try:
-        msgs = run(client.get_messages(CHANNEL, limit=500))
-        for m in msgs:
-            if (m.photo and m.reply_to and hasattr(m.reply_to, 'reply_to_msg_id') and m.reply_to.reply_to_msg_id == message_id):
-                buf = io.BytesIO(); run(client.download_media(m, file=buf)); buf.seek(0)
-                return Response(buf.read(), mimetype="image/jpeg")
-    except Exception: pass
-    msg = run(client.get_messages(CHANNEL, ids=message_id))
-    if not msg or not msg.video or not msg.video.thumbs: return "", 404
-    buf = io.BytesIO(); run(client.download_media(msg, file=buf, thumb=-1)); buf.seek(0)
-    return Response(buf.read(), mimetype="image/jpeg")
-
-def parse_caption(caption):
-    if not caption: return None
-    parts = [p.strip() for p in caption.split("|", 3)]
-    if len(parts) == 4: return {"subject": parts[0], "grade": parts[1], "chapter": parts[2], "topic": parts[3]}
-    return {"subject": "General", "grade": "General", "chapter": "Uncategorized", "topic": caption}
-
-def build_structure():
-    msgs = run(client.get_messages(CHANNEL, limit=1000))
-    grades = {}
-    for m in msgs:
-        info = get_msg_file_info(m)
-        if not info: continue
-        if m.message and (m.message.startswith(USERS_MSG_MARKER) or m.message.startswith(SETTINGS_MSG_MARKER) or m.message.startswith(CODES_MSG_MARKER) or m.message.startswith(REWARDS_MSG_MARKER)): continue
-        meta = parse_caption(m.message or "")
-        if not meta: continue
-        g_name, sbj, ch = meta["grade"], meta["subject"], meta["chapter"]
-        if g_name not in grades: grades[g_name] = {"grade": g_name, "subjects": {}}
-        if sbj not in grades[g_name]["subjects"]: grades[g_name]["subjects"][sbj] = {"subject": sbj, "chapters": {}}
-        if ch not in grades[g_name]["subjects"][sbj]["chapters"]: grades[g_name]["subjects"][sbj]["chapters"][ch] = {"chapter": ch, "videos": []}
-        grades[g_name]["subjects"][sbj]["chapters"][ch]["videos"].append({
-            "id": m.id, "tg_msg_id": m.id, "title": meta["topic"], "playlist": sbj, "grade": g_name, "chapter": ch, "subject": sbj,
-            "download_url": f"/download/{m.id}", "thumb_url": f"/thumb/{m.id}",
-        })
-    result = []
-    for g in grades.values():
-        g["subjects"] = list(g["subjects"].values())
-        for s in g["subjects"]:
-            s["chapters"] = list(s["chapters"].values())
-            for c in s["chapters"]: c["videos"].sort(key=lambda v: v["tg_msg_id"])
-        result.append(g)
-    return result
-
-@app.route("/api/playlists")
-@require_auth
-def api_playlists(): return jsonify([{"title": g["grade"], "subject_count": len(g["subjects"])} for g in build_structure()])
-
-@app.route("/api/grade/<string:grade_name>")
-@require_auth
-def api_grade(grade_name):
-    for g in build_structure():
-        if g["grade"] == grade_name: return jsonify(g)
-    return jsonify({"error": "not found"}), 404
 
 @app.route("/admin/users")
 @require_admin
@@ -384,7 +307,6 @@ def admin_approve_reward(phone):
     user = USERS.get(phone)
     if not user: return jsonify({"error": "user not found"}), 404
     
-    # Grant 30 days
     now = datetime.utcnow()
     pay = user.setdefault("payment", {})
     base = now
@@ -398,8 +320,7 @@ def admin_approve_reward(phone):
     pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=30)).isoformat(), "last_payment_ref": "REWARD-50-LIKES", "last_payment_at": now.isoformat()})
     
     del REWARDS[phone]
-    save_users()
-    save_rewards()
+    save_users(); save_rewards()
     return jsonify({"ok": True, "message": "Reward approved! 30 days added."})
 
 ADMIN_HTML = """
@@ -440,7 +361,7 @@ ADMIN_HTML = """
       <label>Trial Days</label><input type="number" id="defTrial" value="3">
       <label>Payment Phone</label><input type="text" id="payPhone" value="0952350836">
       <label>Payment Name</label><input type="text" id="payName" value="Noah">
-      <label>Support Telegram</label><input type="text" id="supportTg" value="https://t.me/YourSupportUsername">
+      <label>Support Telegram Link</label><input type="text" id="supportTg" value="https://t.me/Ace_spy">
       <button onclick="saveSettings()">Save Settings</button>
     </div>
 
