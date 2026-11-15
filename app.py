@@ -19,9 +19,9 @@ CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
 USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
-SETTINGS_MSG_MARKER = "D2AI_SETTINGS_v1"
-CODES_MSG_MARKER    = "D2AI_CODES_v1"
-REWARDS_MSG_MARKER  = "D2AI_REWARDS_v1"
+SETTINGS_MSG_MARKER = "D2AI_SETTINGS_V1"
+CODES_MSG_MARKER    = "D2AI_CODES_V1"
+REWARDS_MSG_MARKER  = "D2AI_REWARDS_V1"
 
 app = Flask(__name__)
 CORS(app)
@@ -157,7 +157,6 @@ def register():
     if not phone or not password or not device_id: return jsonify({"error": "phone, password, device_id required"}), 400
     if phone in USERS: return jsonify({"error": "phone already registered"}), 409
     
-    # Enforce 1 Device = 1 Account
     for u_phone, u_data in USERS.items():
         if u_data.get("device_id") == device_id:
             return jsonify({"error": "This device is already linked to an account. Please recover your old account."}), 403
@@ -245,7 +244,6 @@ def redeem_code():
     now = datetime.utcnow()
     pay = request.user.setdefault("payment", {})
     
-    # If currently paid, extend. If trial, replace.
     base = now
     if pay.get("mode") == "paid" and pay.get("until"):
         try:
@@ -276,8 +274,153 @@ def submit_reward():
     save_rewards()
     return jsonify({"ok": True, "message": "Proof submitted! Admin will review it."})
 
+# --- FULL ADMIN PANEL (RESTORED) ---
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>D² Ai Admin</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; font-family: system-ui, sans-serif; }
+  body { margin: 0; background: #0F172A; color: white; }
+  header { background: #1E293B; padding: 20px; text-align: center; border-bottom: 1px solid #334155; }
+  h1 { margin: 0; color: #3B82F6; font-size: 24px; }
+  .container { max-width: 1000px; margin: 20px auto; padding: 0 16px; }
+  .card { background: #1E293B; padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
+  h2 { margin-top: 0; color: #3B82F6; font-size: 18px; }
+  input, select { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; margin-bottom: 12px; }
+  button { background: #3B82F6; color: white; border: 0; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: bold; }
+  button:hover { background: #2563EB; }
+  button.danger { background: #EF4444; }
+  button.success { background: #10B981; }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #334155; font-size: 14px; }
+</style>
+</head>
+<body>
+<header><h1>D² Ai — Admin Panel</h1></header>
+<div class="container">
+  <div class="card">
+    <h2>🔑 Admin Key</h2>
+    <input type="password" id="adminKey" placeholder="Enter Admin Key">
+    <button onclick="loadPanel()">Enter Panel</button>
+  </div>
+
+  <div id="panel" style="display:none;">
+    <div class="card">
+      <h2>⚙️ Global Settings</h2>
+      <label>Default Price (ETB)</label><input type="number" id="defPrice" value="99">
+      <label>Trial Days</label><input type="number" id="defTrial" value="3">
+      <label>Payment Phone</label><input type="text" id="payPhone" value="0952350836">
+      <label>Payment Name</label><input type="text" id="payName" value="Noah">
+      <label>Support Telegram Link</label><input type="text" id="supportTg" value="https://t.me/Ace_spy">
+      <button onclick="saveSettings()">Save Settings</button>
+    </div>
+
+    <div class="card">
+      <h2>🎟️ Generate Activation Code</h2>
+      <label>Days to add:</label>
+      <input type="number" id="codeDays" value="30">
+      <button onclick="genCode()">Generate Code</button>
+      <div id="codeResult" style="margin-top:10px; font-weight:bold; color:#10B981;"></div>
+    </div>
+
+    <div class="card">
+      <h2>🏆 Rewards (50 Likes)</h2>
+      <div id="rewardsList"></div>
+    </div>
+
+    <div class="card">
+      <h2>👥 Users Management</h2>
+      <div id="usersList"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const key = () => $('adminKey').value;
+
+async function loadPanel() {
+  if (!key()) return alert('Enter key');
+  const r = await fetch('/admin/settings', { headers: { 'X-Admin-Key': key() } });
+  if (r.status === 401) return alert('Wrong key');
+  const s = await r.json();
+  $('defPrice').value = s.default_price_etb;
+  $('defTrial').value = s.default_trial_days;
+  $('payPhone').value = s.payment_phone || "0952350836";
+  $('payName').value = s.payment_name || "Noah";
+  $('supportTg').value = s.support_telegram || "";
+  $('panel').style.display = 'block';
+  loadUsers();
+  loadRewards();
+}
+
+async function saveSettings() {
+  await fetch('/admin/settings', {
+    method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ 
+      default_price_etb: parseInt($('defPrice').value), default_trial_days: parseInt($('defTrial').value),
+      payment_phone: $('payPhone').value, payment_name: $('payName').value, support_telegram: $('supportTg').value
+    })
+  });
+  alert('Settings saved!');
+}
+
+async function genCode() {
+  const days = parseInt($('codeDays').value);
+  const r = await fetch('/admin/generate-code', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ days: days }) });
+  const data = await r.json();
+  $('codeResult').innerText = `Code: ${data.code} (Valid for ${days} days)`;
+}
+
+async function loadRewards() {
+  $('rewardsList').innerHTML = 'Loading...';
+  const r = await fetch('/admin/rewards', { headers: { 'X-Admin-Key': key() } });
+  const rewards = await r.json();
+  let html = '';
+  rewards.forEach(rw => {
+    html += `
+      <div class="row">
+        <div><b>${rw.phone}</b><br><span style="color:#94A3B8;font-size:12px;">Proof: ${rw.proof}</span></div>
+        <div><button class="success" onclick="approveReward('${rw.phone}')">Approve</button></div>
+      </div>`;
+  });
+  $('rewardsList').innerHTML = html || 'No pending rewards.';
+}
+
+async function approveReward(phone) {
+  await fetch('/admin/reward/' + phone + '/approve', { method: 'POST', headers: { 'X-Admin-Key': key() } });
+  loadRewards(); loadUsers();
+}
+
+async function loadUsers() {
+  $('usersList').innerHTML = 'Loading...';
+  const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
+  const users = await r.json();
+  let html = '';
+  users.forEach(u => {
+    html += `
+      <div class="row">
+        <div><b>${u.phone}</b> - ${u.name || 'No Name'} (${u.is_active ? '🟢 Active' : '🔴 Disabled'})</div>
+        <div><button class="${u.is_active ? 'danger' : 'success'}" onclick="toggleUser('${u.phone}')">${u.is_active ? 'Disable' : 'Enable'}</button></div>
+      </div>`;
+  });
+  $('usersList').innerHTML = html || 'No users found.';
+}
+
+async function toggleUser(phone) {
+  await fetch('/admin/toggle-user/' + phone, { method: 'POST', headers: { 'X-Admin-Key': key() } });
+  loadUsers();
+}
+</script>
+</body>
+</html>
+"""
+
 @app.route("/admin")
-def admin_page(): return "Admin Panel"
+def admin_page(): return render_template_string(ADMIN_HTML)
+
 @app.route("/admin/settings", methods=["GET", "POST"])
 @require_admin
 def admin_settings():
@@ -288,6 +431,56 @@ def admin_settings():
         save_settings()
         return jsonify({"ok": True})
     return jsonify(SETTINGS)
+
+@app.route("/admin/users")
+@require_admin
+def admin_users(): return jsonify([{"phone": u["phone"], "name": u.get("name"), "is_active": u.get("is_active", True), "payment": u.get("payment", {})} for u in USERS.values()])
+
+@app.route("/admin/toggle-user/<phone>", methods=["POST"])
+@require_admin
+def admin_toggle_user(phone):
+    user = USERS.get(phone)
+    if not user: return jsonify({"error": "user not found"}), 404
+    user["is_active"] = not user.get("is_active", True)
+    save_users()
+    return jsonify({"ok": True, "is_active": user["is_active"]})
+
+@app.route("/admin/generate-code", methods=["POST"])
+@require_admin
+def admin_generate_code():
+    data = request.get_json() or {}
+    days = int(data.get("days", 30))
+    code = f"D2AI-{secrets.token_hex(4).upper()}"
+    ACTIVATION_CODES[code] = {"days": days, "used_by": None}
+    save_codes()
+    return jsonify({"ok": True, "code": code})
+
+@app.route("/admin/rewards")
+@require_admin
+def admin_rewards(): return jsonify(list(REWARDS.values()))
+
+@app.route("/admin/reward/<phone>/approve", methods=["POST"])
+@require_admin
+def admin_approve_reward(phone):
+    if phone not in REWARDS: return jsonify({"error": "reward not found"}), 404
+    user = USERS.get(phone)
+    if not user: return jsonify({"error": "user not found"}), 404
+    
+    now = datetime.utcnow()
+    pay = user.setdefault("payment", {})
+    base = now
+    until_str = pay.get("until")
+    if until_str:
+        try:
+            prev = datetime.fromisoformat(until_str)
+            if prev > now: base = prev
+        except Exception: pass
+        
+    pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=30)).isoformat(), "last_payment_ref": "REWARD-50-LIKES", "last_payment_at": now.isoformat()})
+    
+    del REWARDS[phone]
+    save_users(); save_rewards()
+    return jsonify({"ok": True, "message": "Reward approved! 30 days added."})
 
 if __name__ == "__main__":
     try:
