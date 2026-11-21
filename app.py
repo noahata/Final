@@ -39,7 +39,7 @@ REWARDS_MSG_ID = None
 DEFAULT_SETTINGS = {
     "default_price_etb": 99,
     "default_period_days": 30,
-    "default_trial_days": 3,
+    "default_trial_days": 14, # Updated to 14 days as requested
     "payments_enabled_globally": True,
     "payment_phone": "0952350836",
     "payment_name": "Noah",
@@ -148,6 +148,47 @@ def _require_active_subscription(f):
         return f(*args, **kwargs)
     return wrapper
 
+# --- PRIVACY POLICY ROUTE ---
+@app.route("/privacy")
+def privacy_policy():
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <title>D² AI - Privacy Policy</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+      body { font-family: system-ui, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: auto; background: #09090B; color: #E2E8F0; }
+      h1, h2 { color: #3B82F6; }
+      a { color: #3B82F6; }
+    </style>
+    </head>
+    <body>
+      <h1>Privacy Policy for D² AI</h1>
+      <p>Last updated: <span id="date"></span></p>
+      
+      <h2>1. Information We Collect</h2>
+      <p>We collect your <b>Phone Number</b>, <b>Full Name</b> (if provided), and <b>Device ID</b>. This information is required to create your account, manage your subscription, and ensure account security (device locking).</p>
+      
+      <h2>2. How We Use Your Information</h2>
+      <p>Your Phone Number is used for authentication. Your Device ID is used to ensure one account per device. We do not sell, trade, or share your personal information with third parties.</p>
+      
+      <h2>3. Data Storage</h2>
+      <p>Your data is securely stored on our servers. The AI model runs entirely on your device, and your AI chat history is saved locally on your phone, not on our servers.</p>
+      
+      <h2>4. Account Deletion</h2>
+      <p>You can request account deletion at any time by contacting us on Telegram. Your data will be permanently removed from our servers.</p>
+      
+      <h2>5. Contact Us</h2>
+      <p>If you have questions, contact us on Telegram: <a href="https://t.me/D_squre_Ai">https://t.me/D_squre_Ai</a></p>
+
+      <script>document.getElementById('date').innerText = new Date().toLocaleDateString();</script>
+    </body>
+    </html>
+    """
+    return html
+# --- END PRIVACY ROUTE ---
+
 @app.route("/auth/register", methods=["POST"])
 def register():
     data = request.get_json() or {}
@@ -161,7 +202,7 @@ def register():
         if u_data.get("device_id") == device_id:
             return jsonify({"error": "This device is already linked to an account. Please recover your old account."}), 403
 
-    trial_days = SETTINGS.get("default_trial_days", 3)
+    trial_days = SETTINGS.get("default_trial_days", 14)
     USERS[phone] = {
         "phone": phone, "password_hash": hash_password(password), "name": name,
         "device_id": device_id, "device_name": device_name, "is_active": True,
@@ -274,7 +315,7 @@ def submit_reward():
     save_rewards()
     return jsonify({"ok": True, "message": "Proof submitted! Admin will review it."})
 
-# --- FULL ADMIN PANEL (RESTORED) ---
+# --- FULL ADMIN PANEL ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -310,7 +351,7 @@ ADMIN_HTML = """
     <div class="card">
       <h2>⚙️ Global Settings</h2>
       <label>Default Price (ETB)</label><input type="number" id="defPrice" value="99">
-      <label>Trial Days</label><input type="number" id="defTrial" value="3">
+      <label>Trial Days</label><input type="number" id="defTrial" value="14">
       <label>Payment Phone</label><input type="text" id="payPhone" value="0952350836">
       <label>Payment Name</label><input type="text" id="payName" value="Noah">
       <label>Support Telegram Link</label><input type="text" id="supportTg" value="https://t.me/Ace_spy">
