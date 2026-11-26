@@ -370,15 +370,17 @@ def admin_toggle_ban(phone):
 if __name__ == "__main__":
     print("Starting Telegram Client...")
     
-    # We must use our custom run() function to start the client
-    # because we are inside a normal Flask (sync) app.
-    try:
-        run(client.start())
-        print("Loading databases from Telegram...")
+    # We must pass a coroutine to the event loop, not the client object itself.
+    # client.start() returns a coroutine, so we wrap it in an async function.
+    async def start_client_and_load():
+        await client.start()
         load_users()
         load_payments()
         load_settings()
         print("✅ Databases loaded successfully.")
+
+    try:
+        asyncio.run(start_client_and_load())
     except Exception as e:
         print(f"❌ Startup error: {e}")
 
