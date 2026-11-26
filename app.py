@@ -5,6 +5,7 @@ import secrets
 import asyncio
 import hmac
 import requests
+import threading
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string
@@ -29,6 +30,7 @@ app = Flask(__name__)
 CORS(app)
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
+# Global data stores
 USERS = {}
 SESSIONS = {}
 PAYMENTS = {}
@@ -42,7 +44,9 @@ DEFAULT_SETTINGS = {
     "chapa_test_mode": True 
 }
 
-def run(coro):
+# --- ASYNC HELPERS ---
+def run_async(coro):
+    """Run a coroutine in a new event loop safely."""
     try:
         loop = asyncio.get_running_loop()
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
@@ -60,23 +64,23 @@ def save_to_tg(marker, data, msg_id_holder):
     payload = marker + "\n" + json.dumps(data, ensure_ascii=False)
     try:
         if msg_id_holder == "users":
-            if USERS_MSG_ID: run(client.edit_message(CHANNEL, USERS_MSG_ID, payload))
+            if USERS_MSG_ID: run_async(client.edit_message(CHANNEL, USERS_MSG_ID, payload))
             else:
-                msg = run(client.send_message(CHANNEL, payload)); USERS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
+                msg = run_async(client.send_message(CHANNEL, payload)); USERS_MSG_ID = msg.id; run_async(client.pin_message(CHANNEL, msg.id))
         elif msg_id_holder == "payments":
-            if PAYMENTS_MSG_ID: run(client.edit_message(CHANNEL, PAYMENTS_MSG_ID, payload))
+            if PAYMENTS_MSG_ID: run_async(client.edit_message(CHANNEL, PAYMENTS_MSG_ID, payload))
             else:
-                msg = run(client.send_message(CHANNEL, payload)); PAYMENTS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
+                msg = run_async(client.send_message(CHANNEL, payload)); PAYMENTS_MSG_ID = msg.id; run_async(client.pin_message(CHANNEL, msg.id))
         elif msg_id_holder == "settings":
-            if SETTINGS_MSG_ID: run(client.edit_message(CHANNEL, SETTINGS_MSG_ID, payload))
+            if SETTINGS_MSG_ID: run_async(client.edit_message(CHANNEL, SETTINGS_MSG_ID, payload))
             else:
-                msg = run(client.send_message(CHANNEL, payload)); SETTINGS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
+                msg = run_async(client.send_message(CHANNEL, payload)); SETTINGS_MSG_ID = msg.id; run_async(client.pin_message(CHANNEL, msg.id))
     except Exception as e: print(f"⚠️ save {msg_id_holder} failed: {e}")
 
 def load_from_tg(marker, dict_to_fill, id_type):
     global USERS_MSG_ID, PAYMENTS_MSG_ID, SETTINGS_MSG_ID
     try:
-        msgs = run(client.get_messages(CHANNEL, limit=200))
+        msgs = run_async(client.get_messages(CHANNEL, limit=200))
         for m in msgs:
             if m.message and m.message.startswith(marker):
                 if id_type == "users": USERS_MSG_ID = m.id
@@ -366,22 +370,31 @@ def admin_toggle_ban(phone):
     save_users()
     return jsonify({"ok": True})
 
-# --- FIXED STARTUP LOGIC ---
-if __name__ == "__main__":
-    print("Starting Telegram Client...")
-    
-    # We must pass a coroutine to the event loop, not the client object itself.
-    # client.start() returns a coroutine, so we wrap it in an async function.
-    async def start_client_and_load():
-        await client.start()
+# --- CORRECTED STARTUP LOGIC ---
+def start_telegram_client():
+    """Starts the Telethon client in a separate thread to prevent blocking Flask."""
+    try:
+        print("Starting Telegram Client...")
+        # Use a dedicated event loop for Telethon
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(client.start())
+        print("Loading databases from Telegram...")
         load_users()
         load_payments()
         load_settings()
         print("✅ Databases loaded successfully.")
-
-    try:
-        asyncio.run(start_client_and_load())
+        # Keep the loop running for background tasks
+        loop.run_forever()
     except Exception as e:
         print(f"❌ Startup error: {e}")
 
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+if __name__ == "__main__":
+    # 1. Start Telegram in a background thread so it doesn't block Flask
+    telegram_thread = threading.Thread(target=start_telegram_client, daemon=True)
+    telegram_thread.start()
+
+    # 2. Start Flask immediately on the port Render provides
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting Flask on port {port}...")
+    app.run(host="0.0.0.0", port=port)
