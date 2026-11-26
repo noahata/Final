@@ -5,6 +5,8 @@ import hashlib
 import secrets
 import asyncio
 import traceback
+import hmac
+import requests
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, request, Response, jsonify, render_template_string
@@ -18,10 +20,15 @@ SESSION          = os.environ["TG_SESSION"]
 CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
+# CHAPA ENVIRONMENT VARIABLES
+CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY")
+CHAPA_WEBHOOK_SECRET = os.environ.get("CHAPA_WEBHOOK_SECRET")
+
 USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
 SETTINGS_MSG_MARKER = "D2AI_SETTINGS_V1"
 CODES_MSG_MARKER    = "D2AI_CODES_V1"
 REWARDS_MSG_MARKER  = "D2AI_REWARDS_V1"
+PAYMENTS_MSG_MARKER = "D2AI_PAYMENTS_V1"
 
 app = Flask(__name__)
 CORS(app)
@@ -31,15 +38,17 @@ USERS = {}
 SESSIONS = {}
 ACTIVATION_CODES = {}
 REWARDS = {}
+PAYMENTS = {}
 USERS_MSG_ID = None
 SETTINGS_MSG_ID = None
 CODES_MSG_ID = None
 REWARDS_MSG_ID = None
+PAYMENTS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_price_etb": 99,
     "default_period_days": 30,
-    "default_trial_days": 14, # Updated to 14 days as requested
+    "default_trial_days": 14,
     "payments_enabled_globally": True,
     "payment_phone": "0952350836",
     "payment_name": "Noah",
@@ -61,7 +70,7 @@ def hash_password(pw): return hashlib.sha256(pw.encode()).hexdigest()
 def make_token(): return secrets.token_urlsafe(48)
 
 def save_to_tg(marker, data, msg_id_holder):
-    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID
+    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID, PAYMENTS_MSG_ID
     payload = marker + "\n" + json.dumps(data, ensure_ascii=False)
     try:
         if msg_id_holder == "users":
@@ -80,10 +89,14 @@ def save_to_tg(marker, data, msg_id_holder):
             if REWARDS_MSG_ID: run(client.edit_message(CHANNEL, REWARDS_MSG_ID, payload))
             else:
                 msg = run(client.send_message(CHANNEL, payload)); REWARDS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
+        elif msg_id_holder == "payments":
+            if PAYMENTS_MSG_ID: run(client.edit_message(CHANNEL, PAYMENTS_MSG_ID, payload))
+            else:
+                msg = run(client.send_message(CHANNEL, payload)); PAYMENTS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
     except Exception as e: print(f"⚠️ save {msg_id_holder} failed: {e}")
 
 def load_from_tg(marker, dict_to_fill, id_type):
-    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID
+    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID, PAYMENTS_MSG_ID
     try:
         msgs = run(client.get_messages(CHANNEL, limit=200))
         for m in msgs:
@@ -92,6 +105,7 @@ def load_from_tg(marker, dict_to_fill, id_type):
                 elif id_type == "settings": SETTINGS_MSG_ID = m.id
                 elif id_type == "codes": CODES_MSG_ID = m.id
                 elif id_type == "rewards": REWARDS_MSG_ID = m.id
+                elif id_type == "payments": PAYMENTS_MSG_ID = m.id
                 _, _, json_part = m.message.partition("\n")
                 dict_to_fill.clear()
                 dict_to_fill.update(json.loads(json_part))
@@ -102,10 +116,13 @@ def save_users(): save_to_tg(USERS_MSG_MARKER, USERS, "users")
 def save_settings(): save_to_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
 def save_codes(): save_to_tg(CODES_MSG_MARKER, ACTIVATION_CODES, "codes")
 def save_rewards(): save_to_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
+def save_payments(): save_to_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
+
 def load_users(): load_from_tg(USERS_MSG_MARKER, USERS, "users")
 def load_settings(): load_from_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
 def load_codes(): load_from_tg(CODES_MSG_MARKER, ACTIVATION_CODES, "codes")
 def load_rewards(): load_from_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
+def load_payments(): load_from_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
 
 def require_auth(f):
     @wraps(f)
@@ -139,14 +156,6 @@ def _user_subscription_state(user):
     now = datetime.utcnow()
     if until < now: return {"status": "expired", "locked": True, "days_left": 0, "until": until_str}
     return {"status": pay.get("status", "active"), "locked": False, "days_left": (until - now).days, "until": until_str}
-
-def _require_active_subscription(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        state = _user_subscription_state(request.user)
-        if state["locked"]: return jsonify({"error": "subscription_required", "subscription": state}), 402
-        return f(*args, **kwargs)
-    return wrapper
 
 # --- PRIVACY POLICY ROUTE ---
 @app.route("/privacy")
@@ -187,7 +196,6 @@ def privacy_policy():
     </html>
     """
     return html
-# --- END PRIVACY ROUTE ---
 
 @app.route("/auth/register", methods=["POST"])
 def register():
@@ -271,51 +279,91 @@ def subscription_status():
         "recovery_code": request.user.get("recovery_code", "")
     })
 
-@app.route("/api/subscription/redeem", methods=["POST"])
+# --- CHAPA PAYMENT INTEGRATION ---
+@app.route("/api/payment/initialize", methods=["POST"])
 @require_auth
-def redeem_code():
+def init_payment():
     data = request.get_json() or {}
-    code = data.get("code", "").strip().upper()
-    if not code: return jsonify({"error": "Code required"}), 400
-    code_data = ACTIVATION_CODES.get(code)
-    if not code_data: return jsonify({"error": "Invalid code"}), 404
-    if code_data.get("used_by"): return jsonify({"error": "Code already used"}), 400
+    amount = data.get("amount", 99)
+    days = data.get("days", 30)
     
-    days = code_data.get("days", 30)
-    now = datetime.utcnow()
-    pay = request.user.setdefault("payment", {})
+    tx_ref = f"D2AI-{request.phone}-{int(datetime.utcnow().timestamp())}"
     
-    base = now
-    if pay.get("mode") == "paid" and pay.get("until"):
-        try:
-            prev = datetime.fromisoformat(pay.get("until"))
-            if prev > now: base = prev
-        except Exception: pass
+    headers = {
+        "Authorization": f"Bearer {CHAPA_SECRET_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "amount": str(amount),
+        "currency": "ETB",
+        "email": f"{request.phone}@d2ai.com",
+        "first_name": request.user.get("name", "User"),
+        "last_name": "AI",
+        "phone_number": request.phone,
+        "tx_ref": tx_ref,
+        "callback_url": "https://final-k4m9.onrender.com/api/payment/webhook",
+        "return_url": "https://final-k4m9.onrender.com/api/subscription/status",
+        "customization": {
+            "title": "D² AI Premium",
+            "description": f"Subscription for {days} days"
+        }
+    }
+    
+    try:
+        res = requests.post("https://api.chapa.co/v1/transaction/initialize", json=payload, headers=headers)
+        res_data = res.json()
         
-    new_until = base + timedelta(days=days)
-    pay.update({"mode": "paid", "status": "active", "until": new_until.isoformat()})
+        if res_data.get("status") == "success":
+            PAYMENTS[tx_ref] = {"phone": request.phone, "days": days, "status": "pending"}
+            save_payments()
+            return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
+        else:
+            return jsonify({"error": res_data.get("message", "Failed to initialize payment")}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/payment/webhook", methods=["POST"])
+def chapa_webhook():
+    signature = request.headers.get("x-chapa-signature")
+    if not signature:
+        return jsonify({"error": "No signature"}), 400
+        
+    expected_hash = hmac.new(CHAPA_WEBHOOK_SECRET.encode('utf-8'), request.data, hashlib.sha256).hexdigest()
     
-    ACTIVATION_CODES[code]["used_by"] = request.phone
-    save_users(); save_codes()
-    
-    days_left = (new_until - now).days
-    return jsonify({"ok": True, "message": f"Activated! You have {days_left} days left."})
+    if not hmac.compare_digest(expected_hash, signature):
+        return jsonify({"error": "Invalid signature"}), 401
 
-@app.route("/api/support")
-def get_support():
-    return jsonify({"telegram": SETTINGS.get("support_telegram", ""), "payment_phone": SETTINGS.get("payment_phone", ""), "payment_name": SETTINGS.get("payment_name", "")})
+    data = request.get_json()
+    if data.get("status") == "success":
+        tx_ref = data.get("tx_ref")
+        
+        payment_info = PAYMENTS.get(tx_ref)
+        if payment_info and payment_info.get("status") == "pending":
+            phone = payment_info["phone"]
+            days = payment_info["days"]
+            
+            user = USERS.get(phone)
+            if user:
+                now = datetime.utcnow()
+                pay = user.setdefault("payment", {})
+                base = now
+                if pay.get("until"):
+                    try:
+                        prev = datetime.fromisoformat(pay["until"])
+                        if prev > now: base = prev
+                    except: pass
+                
+                pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat(), "last_payment_ref": tx_ref})
+                
+                PAYMENTS[tx_ref]["status"] = "completed"
+                save_users()
+                save_payments()
+                print(f"✅ Payment verified for {phone}. {days} days added.")
+            
+    return jsonify({"status": "ok"}), 200
 
-@app.route("/api/reward", methods=["POST"])
-@require_auth
-def submit_reward():
-    data = request.get_json() or {}
-    proof = data.get("proof", "").strip()
-    if not proof: return jsonify({"error": "Proof link required"}), 400
-    REWARDS[request.phone] = {"phone": request.phone, "proof": proof}
-    save_rewards()
-    return jsonify({"ok": True, "message": "Proof submitted! Admin will review it."})
-
-# --- FULL ADMIN PANEL ---
+# --- ADMIN PANEL ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -526,6 +574,6 @@ def admin_approve_reward(phone):
 if __name__ == "__main__":
     try:
         asyncio.run(client.start())
-        load_users(); load_settings(); load_codes(); load_rewards()
+        load_users(); load_settings(); load_codes(); load_rewards(); load_payments()
     except Exception as e: print(f"❌ Startup error: {e}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
