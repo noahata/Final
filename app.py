@@ -147,7 +147,7 @@ def register():
         "device_id": device_id, "is_active": True, "recovery_code": secrets.token_hex(4).upper(),
         "payment": {"mode": "trial", "status": "trial", "until": (datetime.utcnow() + timedelta(days=trial_days)).isoformat()},
     }
-    save_users() # ✅ Saves to Telegram!
+    save_users()
     token = make_token()
     SESSIONS[token] = {"phone": phone}
     return jsonify({"token": token})
@@ -188,7 +188,7 @@ def init_payment():
         res_data = res.json()
         if res_data.get("status") == "success":
             PAYMENTS[tx_ref] = {"phone": request.phone, "days": days, "status": "pending"}
-            save_payments() # ✅ Saves payment to Telegram!
+            save_payments()
             return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
         return jsonify({"error": "Failed to init"}), 400
     except Exception as e: return jsonify({"error": str(e)}), 500
@@ -217,8 +217,8 @@ def chapa_webhook():
                     except: pass
                 pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
                 PAYMENTS[tx_ref]["status"] = "completed"
-                save_users() # ✅ Saves updated user to Telegram!
-                save_payments() # ✅ Saves updated payment to Telegram!
+                save_users()
+                save_payments()
     return jsonify({"status": "ok"}), 200
 
 # --- ADMIN PANEL ---
@@ -337,7 +337,7 @@ def admin_expire_user(phone):
     if not user: return jsonify({"error": "not found"}), 404
     past_date = (datetime.utcnow() - timedelta(days=1)).isoformat()
     user.setdefault("payment", {}).update({"mode": "trial", "status": "expired", "until": past_date})
-    save_users() # ✅ Saves to Telegram!
+    save_users()
     return jsonify({"ok": True})
 
 @app.route("/admin/user/<phone>/add-days", methods=["POST"])
@@ -354,7 +354,7 @@ def admin_add_days(phone):
             if prev > base: base = prev
         except: pass
     pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
-    save_users() # ✅ Saves to Telegram!
+    save_users()
     return jsonify({"ok": True})
 
 @app.route("/admin/user/<phone>/toggle-ban", methods=["POST"])
@@ -363,14 +363,17 @@ def admin_toggle_ban(phone):
     user = USERS.get(phone)
     if not user: return jsonify({"error": "not found"}), 404
     user["is_active"] = not user.get("is_active", True)
-    save_users() # ✅ Saves to Telegram!
+    save_users()
     return jsonify({"ok": True})
 
-# FIXED STARTUP LOGIC
+# --- FIXED STARTUP LOGIC ---
 if __name__ == "__main__":
+    print("Starting Telegram Client...")
+    
+    # We must use our custom run() function to start the client
+    # because we are inside a normal Flask (sync) app.
     try:
-        print("Starting Telegram Client...")
-        asyncio.run(client.start())  # FIXED: Correctly starts the client
+        run(client.start())
         print("Loading databases from Telegram...")
         load_users()
         load_payments()
