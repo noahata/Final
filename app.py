@@ -1,15 +1,13 @@
 import os
-import io
 import json
 import hashlib
 import secrets
 import asyncio
-import traceback
 import hmac
 import requests
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, request, Response, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -20,14 +18,10 @@ SESSION          = os.environ["TG_SESSION"]
 CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
-# CHAPA ENVIRONMENT VARIABLES
 CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY")
 CHAPA_WEBHOOK_SECRET = os.environ.get("CHAPA_WEBHOOK_SECRET")
 
 USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
-SETTINGS_MSG_MARKER = "D2AI_SETTINGS_V1"
-CODES_MSG_MARKER    = "D2AI_CODES_V1"
-REWARDS_MSG_MARKER  = "D2AI_REWARDS_V1"
 PAYMENTS_MSG_MARKER = "D2AI_PAYMENTS_V1"
 
 app = Flask(__name__)
@@ -36,23 +30,13 @@ client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
 USERS = {}
 SESSIONS = {}
-ACTIVATION_CODES = {}
-REWARDS = {}
 PAYMENTS = {}
 USERS_MSG_ID = None
-SETTINGS_MSG_ID = None
-CODES_MSG_ID = None
-REWARDS_MSG_ID = None
 PAYMENTS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
-    "default_price_etb": 99,
-    "default_period_days": 30,
     "default_trial_days": 14,
-    "payments_enabled_globally": True,
-    "payment_phone": "0952350836",
-    "payment_name": "Noah",
-    "support_telegram": "https://t.me/Ace_spy" 
+    "chapa_test_mode": True 
 }
 SETTINGS = dict(DEFAULT_SETTINGS)
 
@@ -70,25 +54,13 @@ def hash_password(pw): return hashlib.sha256(pw.encode()).hexdigest()
 def make_token(): return secrets.token_urlsafe(48)
 
 def save_to_tg(marker, data, msg_id_holder):
-    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID, PAYMENTS_MSG_ID
+    global USERS_MSG_ID, PAYMENTS_MSG_ID
     payload = marker + "\n" + json.dumps(data, ensure_ascii=False)
     try:
         if msg_id_holder == "users":
             if USERS_MSG_ID: run(client.edit_message(CHANNEL, USERS_MSG_ID, payload))
             else:
                 msg = run(client.send_message(CHANNEL, payload)); USERS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
-        elif msg_id_holder == "settings":
-            if SETTINGS_MSG_ID: run(client.edit_message(CHANNEL, SETTINGS_MSG_ID, payload))
-            else:
-                msg = run(client.send_message(CHANNEL, payload)); SETTINGS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
-        elif msg_id_holder == "codes":
-            if CODES_MSG_ID: run(client.edit_message(CHANNEL, CODES_MSG_ID, payload))
-            else:
-                msg = run(client.send_message(CHANNEL, payload)); CODES_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
-        elif msg_id_holder == "rewards":
-            if REWARDS_MSG_ID: run(client.edit_message(CHANNEL, REWARDS_MSG_ID, payload))
-            else:
-                msg = run(client.send_message(CHANNEL, payload)); REWARDS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
         elif msg_id_holder == "payments":
             if PAYMENTS_MSG_ID: run(client.edit_message(CHANNEL, PAYMENTS_MSG_ID, payload))
             else:
@@ -96,15 +68,12 @@ def save_to_tg(marker, data, msg_id_holder):
     except Exception as e: print(f"⚠️ save {msg_id_holder} failed: {e}")
 
 def load_from_tg(marker, dict_to_fill, id_type):
-    global USERS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID, PAYMENTS_MSG_ID
+    global USERS_MSG_ID, PAYMENTS_MSG_ID
     try:
         msgs = run(client.get_messages(CHANNEL, limit=200))
         for m in msgs:
             if m.message and m.message.startswith(marker):
                 if id_type == "users": USERS_MSG_ID = m.id
-                elif id_type == "settings": SETTINGS_MSG_ID = m.id
-                elif id_type == "codes": CODES_MSG_ID = m.id
-                elif id_type == "rewards": REWARDS_MSG_ID = m.id
                 elif id_type == "payments": PAYMENTS_MSG_ID = m.id
                 _, _, json_part = m.message.partition("\n")
                 dict_to_fill.clear()
@@ -113,15 +82,8 @@ def load_from_tg(marker, dict_to_fill, id_type):
     except Exception as e: print(f"⚠️ load {id_type} failed: {e}")
 
 def save_users(): save_to_tg(USERS_MSG_MARKER, USERS, "users")
-def save_settings(): save_to_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
-def save_codes(): save_to_tg(CODES_MSG_MARKER, ACTIVATION_CODES, "codes")
-def save_rewards(): save_to_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
 def save_payments(): save_to_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
-
 def load_users(): load_from_tg(USERS_MSG_MARKER, USERS, "users")
-def load_settings(): load_from_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
-def load_codes(): load_from_tg(CODES_MSG_MARKER, ACTIVATION_CODES, "codes")
-def load_rewards(): load_from_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
 def load_payments(): load_from_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
 
 def require_auth(f):
@@ -145,7 +107,6 @@ def require_admin(f):
     return wrapper
 
 def _user_subscription_state(user):
-    if not SETTINGS.get("payments_enabled_globally"): return {"status": "free", "locked": False, "days_left": None}
     pay = user.get("payment", {})
     mode = pay.get("mode", "free")
     if mode == "free": return {"status": "free", "locked": False, "days_left": None}
@@ -157,213 +118,99 @@ def _user_subscription_state(user):
     if until < now: return {"status": "expired", "locked": True, "days_left": 0, "until": until_str}
     return {"status": pay.get("status", "active"), "locked": False, "days_left": (until - now).days, "until": until_str}
 
-# --- PRIVACY POLICY ROUTE ---
 @app.route("/privacy")
 def privacy_policy():
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <title>D² AI - Privacy Policy</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <style>
-      body { font-family: system-ui, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: auto; background: #09090B; color: #E2E8F0; }
-      h1, h2 { color: #3B82F6; }
-      a { color: #3B82F6; }
-    </style>
-    </head>
-    <body>
-      <h1>Privacy Policy for D² AI</h1>
-      <p>Last updated: <span id="date"></span></p>
-      
-      <h2>1. Information We Collect</h2>
-      <p>We collect your <b>Phone Number</b>, <b>Full Name</b> (if provided), and <b>Device ID</b>. This information is required to create your account, manage your subscription, and ensure account security (device locking).</p>
-      
-      <h2>2. How We Use Your Information</h2>
-      <p>Your Phone Number is used for authentication. Your Device ID is used to ensure one account per device. We do not sell, trade, or share your personal information with third parties.</p>
-      
-      <h2>3. Data Storage</h2>
-      <p>Your data is securely stored on our servers. The AI model runs entirely on your device, and your AI chat history is saved locally on your phone, not on our servers.</p>
-      
-      <h2>4. Account Deletion</h2>
-      <p>You can request account deletion at any time by contacting us on Telegram. Your data will be permanently removed from our servers.</p>
-      
-      <h2>5. Contact Us</h2>
-      <p>If you have questions, contact us on Telegram: <a href="https://t.me/D_squre_Ai">https://t.me/D_squre_Ai</a></p>
-
-      <script>document.getElementById('date').innerText = new Date().toLocaleDateString();</script>
-    </body>
-    </html>
-    """
-    return html
+    return "Privacy Policy - D2 AI. We collect phone and device ID for security."
 
 @app.route("/auth/register", methods=["POST"])
 def register():
     data = request.get_json() or {}
     phone, password, name, device_id = data.get("phone", "").strip(), data.get("password", ""), data.get("name", "").strip(), data.get("device_id", "")
-    device_name = data.get("device_name", "Unknown")
-    
-    if not phone or not password or not device_id: return jsonify({"error": "phone, password, device_id required"}), 400
-    if phone in USERS: return jsonify({"error": "phone already registered"}), 409
-    
+    if not phone or not password or not device_id: return jsonify({"error": "missing fields"}), 400
+    if phone in USERS: return jsonify({"error": "phone registered"}), 409
     for u_phone, u_data in USERS.items():
-        if u_data.get("device_id") == device_id:
-            return jsonify({"error": "This device is already linked to an account. Please recover your old account."}), 403
+        if u_data.get("device_id") == device_id: return jsonify({"error": "device already linked"}), 403
 
     trial_days = SETTINGS.get("default_trial_days", 14)
     USERS[phone] = {
         "phone": phone, "password_hash": hash_password(password), "name": name,
-        "device_id": device_id, "device_name": device_name, "is_active": True,
-        "created_at": datetime.utcnow().isoformat(), "last_login": None,
-        "profile_pic": "", "recovery_code": secrets.token_hex(4).upper(),
-        "payment": {
-            "mode": "trial", "price_etb": SETTINGS["default_price_etb"], "period_days": SETTINGS["default_period_days"], "status": "trial",
-            "until": (datetime.utcnow() + timedelta(days=trial_days)).isoformat(),
-        },
+        "device_id": device_id, "is_active": True, "recovery_code": secrets.token_hex(4).upper(),
+        "payment": {"mode": "trial", "status": "trial", "until": (datetime.utcnow() + timedelta(days=trial_days)).isoformat()},
     }
     save_users()
     token = make_token()
-    SESSIONS[token] = {"phone": phone, "device_id": device_id}
-    return jsonify({"token": token, "user": {"phone": phone, "name": name, "recovery_code": USERS[phone]["recovery_code"]}})
+    SESSIONS[token] = {"phone": phone}
+    return jsonify({"token": token})
 
 @app.route("/auth/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
     phone, password, device_id = data.get("phone", "").strip(), data.get("password", ""), data.get("device_id", "")
-    if not phone or not password or not device_id: return jsonify({"error": "phone, password, device_id required"}), 400
     user = USERS.get(phone)
     if not user or user["password_hash"] != hash_password(password): return jsonify({"error": "invalid credentials"}), 401
-    if not user.get("is_active", True): return jsonify({"error": "account disabled"}), 403
-    
-    if user.get("device_id") != device_id: 
-        return jsonify({"error": "device_mismatch", "message": "Account locked to another device. Use Recovery Code."}), 403
-        
-    user["last_login"] = datetime.utcnow().isoformat()
-    save_users()
+    if user.get("device_id") != device_id: return jsonify({"error": "device_mismatch"}), 403
     token = make_token()
-    SESSIONS[token] = {"phone": phone, "device_id": device_id}
-    return jsonify({"token": token, "user": {"phone": phone, "name": user["name"], "recovery_code": user.get("recovery_code")}})
-
-@app.route("/auth/recover", methods=["POST"])
-def recover_account():
-    data = request.get_json() or {}
-    phone, recovery_code, new_device_id = data.get("phone", "").strip(), data.get("recovery_code", "").strip().upper(), data.get("device_id", "")
-    user = USERS.get(phone)
-    if not user or user.get("recovery_code") != recovery_code: 
-        return jsonify({"error": "Invalid phone or recovery code"}), 401
-        
-    user["device_id"] = new_device_id
-    save_users()
-    token = make_token()
-    SESSIONS[token] = {"phone": phone, "device_id": new_device_id}
-    return jsonify({"token": token, "user": {"phone": phone, "name": user["name"]}})
-
-@app.route("/auth/profile", methods=["POST"])
-@require_auth
-def update_profile():
-    data = request.get_json() or {}
-    if "name" in data and data["name"]: request.user["name"] = data["name"]
-    if "profile_pic" in data: request.user["profile_pic"] = data["profile_pic"]
-    save_users()
-    return jsonify({"ok": True})
+    SESSIONS[token] = {"phone": phone}
+    return jsonify({"token": token})
 
 @app.route("/api/subscription/status")
 @require_auth
 def subscription_status():
     state = _user_subscription_state(request.user)
-    return jsonify({
-        "mode": request.user.get("payment", {}).get("mode", "free"),
-        "subscription": state,
-        "name": request.user.get("name", ""),
-        "profile_pic": request.user.get("profile_pic", ""),
-        "recovery_code": request.user.get("recovery_code", "")
-    })
+    return jsonify({"subscription": state})
 
-# --- CHAPA PAYMENT INTEGRATION ---
 @app.route("/api/payment/initialize", methods=["POST"])
 @require_auth
 def init_payment():
     data = request.get_json() or {}
-    amount = data.get("amount", 99)
-    days = data.get("days", 30)
-    
+    amount, days = data.get("amount", 99), data.get("days", 30)
     tx_ref = f"D2AI-{request.phone}-{int(datetime.utcnow().timestamp())}"
-    
-    headers = {
-        "Authorization": f"Bearer {CHAPA_SECRET_KEY}",
-        "Content-Type": "application/json"
-    }
-    
+    headers = {"Authorization": f"Bearer {CHAPA_SECRET_KEY}", "Content-Type": "application/json"}
     payload = {
-        "amount": str(amount),
-        "currency": "ETB",
-        "email": f"{request.phone}@d2ai.com",
-        "first_name": request.user.get("name", "User"),
-        "last_name": "AI",
-        "phone_number": request.phone,
-        "tx_ref": tx_ref,
+        "amount": str(amount), "currency": "ETB", "email": f"{request.phone}@d2ai.com",
+        "first_name": "User", "last_name": "AI", "phone_number": request.phone, "tx_ref": tx_ref,
         "callback_url": "https://final-k4m9.onrender.com/api/payment/webhook",
         "return_url": "https://final-k4m9.onrender.com/api/subscription/status",
-        "customization": {
-            "title": "D² AI Premium",
-            "description": f"Subscription for {days} days"
-        }
+        "customization": {"title": "D² AI Premium", "description": f"{days} Days"}
     }
-    
     try:
         res = requests.post("https://api.chapa.co/v1/transaction/initialize", json=payload, headers=headers)
         res_data = res.json()
-        
         if res_data.get("status") == "success":
             PAYMENTS[tx_ref] = {"phone": request.phone, "days": days, "status": "pending"}
             save_payments()
             return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
-        else:
-            return jsonify({"error": res_data.get("message", "Failed to initialize payment")}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Failed to init"}), 400
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route("/api/payment/webhook", methods=["POST"])
 def chapa_webhook():
     signature = request.headers.get("x-chapa-signature")
-    if not signature:
-        return jsonify({"error": "No signature"}), 400
-        
+    if not signature: return jsonify({"error": "No signature"}), 400
     expected_hash = hmac.new(CHAPA_WEBHOOK_SECRET.encode('utf-8'), request.data, hashlib.sha256).hexdigest()
-    
-    if not hmac.compare_digest(expected_hash, signature):
-        return jsonify({"error": "Invalid signature"}), 401
+    if not hmac.compare_digest(expected_hash, signature): return jsonify({"error": "Invalid signature"}), 401
 
     data = request.get_json()
     if data.get("status") == "success":
         tx_ref = data.get("tx_ref")
-        
         payment_info = PAYMENTS.get(tx_ref)
         if payment_info and payment_info.get("status") == "pending":
-            phone = payment_info["phone"]
-            days = payment_info["days"]
-            
+            phone, days = payment_info["phone"], payment_info["days"]
             user = USERS.get(phone)
             if user:
-                now = datetime.utcnow()
                 pay = user.setdefault("payment", {})
-                base = now
+                base = datetime.utcnow()
                 if pay.get("until"):
                     try:
                         prev = datetime.fromisoformat(pay["until"])
-                        if prev > now: base = prev
+                        if prev > base: base = prev
                     except: pass
-                
-                pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat(), "last_payment_ref": tx_ref})
-                
+                pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
                 PAYMENTS[tx_ref]["status"] = "completed"
-                save_users()
-                save_payments()
-                print(f"✅ Payment verified for {phone}. {days} days added.")
-            
+                save_users(); save_payments()
     return jsonify({"status": "ok"}), 200
 
-# --- ADMIN PANEL ---
+# --- NEW PROFESSIONAL ADMIN PANEL ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -378,49 +225,29 @@ ADMIN_HTML = """
   .container { max-width: 1000px; margin: 20px auto; padding: 0 16px; }
   .card { background: #1E293B; padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
   h2 { margin-top: 0; color: #3B82F6; font-size: 18px; }
-  input, select { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; margin-bottom: 12px; }
+  input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; margin-bottom: 12px; }
   button { background: #3B82F6; color: white; border: 0; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: bold; }
   button:hover { background: #2563EB; }
   button.danger { background: #EF4444; }
   button.success { background: #10B981; }
-  .row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #334155; font-size: 14px; }
+  .user-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; border-bottom: 1px solid #334155; }
+  .user-info { display: flex; flex-direction: column; gap: 5px; }
+  .actions { display: flex; gap: 10px; }
 </style>
 </head>
 <body>
-<header><h1>D² Ai — Admin Panel</h1></header>
+<header><h1>D² Ai — Admin Dashboard</h1></header>
 <div class="container">
   <div class="card">
-    <h2>🔑 Admin Key</h2>
+    <h2>🔑 Enter Admin Key</h2>
     <input type="password" id="adminKey" placeholder="Enter Admin Key">
-    <button onclick="loadPanel()">Enter Panel</button>
+    <button onclick="loadPanel()">Access Panel</button>
   </div>
 
   <div id="panel" style="display:none;">
     <div class="card">
-      <h2>⚙️ Global Settings</h2>
-      <label>Default Price (ETB)</label><input type="number" id="defPrice" value="99">
-      <label>Trial Days</label><input type="number" id="defTrial" value="14">
-      <label>Payment Phone</label><input type="text" id="payPhone" value="0952350836">
-      <label>Payment Name</label><input type="text" id="payName" value="Noah">
-      <label>Support Telegram Link</label><input type="text" id="supportTg" value="https://t.me/Ace_spy">
-      <button onclick="saveSettings()">Save Settings</button>
-    </div>
-
-    <div class="card">
-      <h2>🎟️ Generate Activation Code</h2>
-      <label>Days to add:</label>
-      <input type="number" id="codeDays" value="30">
-      <button onclick="genCode()">Generate Code</button>
-      <div id="codeResult" style="margin-top:10px; font-weight:bold; color:#10B981;"></div>
-    </div>
-
-    <div class="card">
-      <h2>🏆 Rewards (50 Likes)</h2>
-      <div id="rewardsList"></div>
-    </div>
-
-    <div class="card">
-      <h2>👥 Users Management</h2>
+      <h2>👥 User Management & Test Override</h2>
+      <p style="color:#94A3B8; font-size:14px; margin-bottom:20px;">Manage subscriptions, test payments, or ban users.</p>
       <div id="usersList"></div>
     </div>
   </div>
@@ -432,55 +259,10 @@ const key = () => $('adminKey').value;
 
 async function loadPanel() {
   if (!key()) return alert('Enter key');
-  const r = await fetch('/admin/settings', { headers: { 'X-Admin-Key': key() } });
+  const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
   if (r.status === 401) return alert('Wrong key');
-  const s = await r.json();
-  $('defPrice').value = s.default_price_etb;
-  $('defTrial').value = s.default_trial_days;
-  $('payPhone').value = s.payment_phone || "0952350836";
-  $('payName').value = s.payment_name || "Noah";
-  $('supportTg').value = s.support_telegram || "";
   $('panel').style.display = 'block';
   loadUsers();
-  loadRewards();
-}
-
-async function saveSettings() {
-  await fetch('/admin/settings', {
-    method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 
-      default_price_etb: parseInt($('defPrice').value), default_trial_days: parseInt($('defTrial').value),
-      payment_phone: $('payPhone').value, payment_name: $('payName').value, support_telegram: $('supportTg').value
-    })
-  });
-  alert('Settings saved!');
-}
-
-async function genCode() {
-  const days = parseInt($('codeDays').value);
-  const r = await fetch('/admin/generate-code', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ days: days }) });
-  const data = await r.json();
-  $('codeResult').innerText = `Code: ${data.code} (Valid for ${days} days)`;
-}
-
-async function loadRewards() {
-  $('rewardsList').innerHTML = 'Loading...';
-  const r = await fetch('/admin/rewards', { headers: { 'X-Admin-Key': key() } });
-  const rewards = await r.json();
-  let html = '';
-  rewards.forEach(rw => {
-    html += `
-      <div class="row">
-        <div><b>${rw.phone}</b><br><span style="color:#94A3B8;font-size:12px;">Proof: ${rw.proof}</span></div>
-        <div><button class="success" onclick="approveReward('${rw.phone}')">Approve</button></div>
-      </div>`;
-  });
-  $('rewardsList').innerHTML = html || 'No pending rewards.';
-}
-
-async function approveReward(phone) {
-  await fetch('/admin/reward/' + phone + '/approve', { method: 'POST', headers: { 'X-Admin-Key': key() } });
-  loadRewards(); loadUsers();
 }
 
 async function loadUsers() {
@@ -489,17 +271,39 @@ async function loadUsers() {
   const users = await r.json();
   let html = '';
   users.forEach(u => {
+    const isPaid = u.payment?.mode === 'paid';
+    const statusBadge = isPaid ? '<span style="color:#10B981">⭐ Paid</span>' : '<span style="color:#F59E0B">🕒 Trial</span>';
+    const statusBan = u.is_active ? '' : ' <span style="color:#EF4444">(Banned)</span>';
+    
     html += `
-      <div class="row">
-        <div><b>${u.phone}</b> - ${u.name || 'No Name'} (${u.is_active ? '🟢 Active' : '🔴 Disabled'})</div>
-        <div><button class="${u.is_active ? 'danger' : 'success'}" onclick="toggleUser('${u.phone}')">${u.is_active ? 'Disable' : 'Enable'}</button></div>
+      <div class="user-row">
+        <div class="user-info">
+          <b>${u.phone}</b> ${statusBadge} ${statusBan}
+          <span style="color:#94A3B8; font-size:12px;">Name: ${u.name || 'N/A'} | Device: ${u.device_id}</span>
+        </div>
+        <div class="actions">
+          <button class="danger" onclick="setExpired('${u.phone}')">Expire Now</button>
+          <button class="success" onclick="addDays('${u.phone}', 30)">+30 Days</button>
+          <button style="background:#475569" onclick="toggleBan('${u.phone}')">${u.is_active ? 'Ban' : 'Unban'}</button>
+        </div>
       </div>`;
   });
-  $('usersList').innerHTML = html || 'No users found.';
+  $('usersList').innerHTML = html;
 }
 
-async function toggleUser(phone) {
-  await fetch('/admin/toggle-user/' + phone, { method: 'POST', headers: { 'X-Admin-Key': key() } });
+async function setExpired(phone) {
+  if(!confirm('Force expire this user to test payment?')) return;
+  await fetch('/admin/user/' + phone + '/expire', { method: 'POST', headers: { 'X-Admin-Key': key() } });
+  loadUsers();
+}
+
+async function addDays(phone, days) {
+  await fetch('/admin/user/' + phone + '/add-days', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ days: days }) });
+  loadUsers();
+}
+
+async function toggleBan(phone) {
+  await fetch('/admin/user/' + phone + '/toggle-ban', { method: 'POST', headers: { 'X-Admin-Key': key() } });
   loadUsers();
 }
 </script>
@@ -510,70 +314,48 @@ async function toggleUser(phone) {
 @app.route("/admin")
 def admin_page(): return render_template_string(ADMIN_HTML)
 
-@app.route("/admin/settings", methods=["GET", "POST"])
-@require_admin
-def admin_settings():
-    if request.method == "POST":
-        data = request.get_json() or {}
-        for k in SETTINGS.keys():
-            if k in data: SETTINGS[k] = data[k]
-        save_settings()
-        return jsonify({"ok": True})
-    return jsonify(SETTINGS)
-
 @app.route("/admin/users")
 @require_admin
-def admin_users(): return jsonify([{"phone": u["phone"], "name": u.get("name"), "is_active": u.get("is_active", True), "payment": u.get("payment", {})} for u in USERS.values()])
+def admin_users():
+    return jsonify([{"phone": u["phone"], "name": u.get("name"), "device_id": u.get("device_id"), "is_active": u.get("is_active", True), "payment": u.get("payment", {})} for u in USERS.values()])
 
-@app.route("/admin/toggle-user/<phone>", methods=["POST"])
+@app.route("/admin/user/<phone>/expire", methods=["POST"])
 @require_admin
-def admin_toggle_user(phone):
+def admin_expire_user(phone):
     user = USERS.get(phone)
-    if not user: return jsonify({"error": "user not found"}), 404
+    if not user: return jsonify({"error": "not found"}), 404
+    past_date = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    user.setdefault("payment", {}).update({"mode": "trial", "status": "expired", "until": past_date})
+    save_users()
+    return jsonify({"ok": True})
+
+@app.route("/admin/user/<phone>/add-days", methods=["POST"])
+@require_admin
+def admin_add_days(phone):
+    user = USERS.get(phone)
+    if not user: return jsonify({"error": "not found"}), 404
+    days = int((request.get_json() or {}).get("days", 30))
+    pay = user.setdefault("payment", {})
+    base = datetime.utcnow()
+    if pay.get("until"):
+        try:
+            prev = datetime.fromisoformat(pay["until"])
+            if prev > base: base = prev
+        except: pass
+    pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
+    save_users()
+    return jsonify({"ok": True})
+
+@app.route("/admin/user/<phone>/toggle-ban", methods=["POST"])
+@require_admin
+def admin_toggle_ban(phone):
+    user = USERS.get(phone)
+    if not user: return jsonify({"error": "not found"}), 404
     user["is_active"] = not user.get("is_active", True)
     save_users()
-    return jsonify({"ok": True, "is_active": user["is_active"]})
-
-@app.route("/admin/generate-code", methods=["POST"])
-@require_admin
-def admin_generate_code():
-    data = request.get_json() or {}
-    days = int(data.get("days", 30))
-    code = f"D2AI-{secrets.token_hex(4).upper()}"
-    ACTIVATION_CODES[code] = {"days": days, "used_by": None}
-    save_codes()
-    return jsonify({"ok": True, "code": code})
-
-@app.route("/admin/rewards")
-@require_admin
-def admin_rewards(): return jsonify(list(REWARDS.values()))
-
-@app.route("/admin/reward/<phone>/approve", methods=["POST"])
-@require_admin
-def admin_approve_reward(phone):
-    if phone not in REWARDS: return jsonify({"error": "reward not found"}), 404
-    user = USERS.get(phone)
-    if not user: return jsonify({"error": "user not found"}), 404
-    
-    now = datetime.utcnow()
-    pay = user.setdefault("payment", {})
-    base = now
-    until_str = pay.get("until")
-    if until_str:
-        try:
-            prev = datetime.fromisoformat(until_str)
-            if prev > now: base = prev
-        except Exception: pass
-        
-    pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=30)).isoformat(), "last_payment_ref": "REWARD-50-LIKES", "last_payment_at": now.isoformat()})
-    
-    del REWARDS[phone]
-    save_users(); save_rewards()
-    return jsonify({"ok": True, "message": "Reward approved! 30 days added."})
+    return jsonify({"ok": True})
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(client.start())
-        load_users(); load_settings(); load_codes(); load_rewards(); load_payments()
-    except Exception as e: print(f"❌ Startup error: {e}")
+    asyncio.run(client.start())
+    load_users(); load_payments()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
