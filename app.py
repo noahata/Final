@@ -30,7 +30,6 @@ app = Flask(__name__)
 CORS(app)
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
-# Global data stores
 USERS = {}
 SESSIONS = {}
 PAYMENTS = {}
@@ -44,7 +43,6 @@ DEFAULT_SETTINGS = {
     "chapa_test_mode": True 
 }
 
-# --- ASYNC HELPERS ---
 def run_async(coro):
     """Run a coroutine in a new event loop safely."""
     try:
@@ -171,7 +169,11 @@ def login():
 @require_auth
 def subscription_status():
     state = _user_subscription_state(request.user)
-    return jsonify({"subscription": state})
+    return jsonify({
+        "subscription": state,
+        "recovery_code": request.user.get("recovery_code", "N/A"),
+        "name": request.user.get("name", "")
+    })
 
 @app.route("/api/payment/initialize", methods=["POST"])
 @require_auth
@@ -370,12 +372,11 @@ def admin_toggle_ban(phone):
     save_users()
     return jsonify({"ok": True})
 
-# --- CORRECTED STARTUP LOGIC ---
+# --- STARTUP LOGIC ---
 def start_telegram_client():
     """Starts the Telethon client in a separate thread to prevent blocking Flask."""
     try:
         print("Starting Telegram Client...")
-        # Use a dedicated event loop for Telethon
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(client.start())
@@ -384,17 +385,14 @@ def start_telegram_client():
         load_payments()
         load_settings()
         print("✅ Databases loaded successfully.")
-        # Keep the loop running for background tasks
         loop.run_forever()
     except Exception as e:
         print(f"❌ Startup error: {e}")
 
 if __name__ == "__main__":
-    # 1. Start Telegram in a background thread so it doesn't block Flask
     telegram_thread = threading.Thread(target=start_telegram_client, daemon=True)
     telegram_thread.start()
 
-    # 2. Start Flask immediately on the port Render provides
     port = int(os.environ.get("PORT", 5000))
     print(f"Starting Flask on port {port}...")
     app.run(host="0.0.0.0", port=port)
