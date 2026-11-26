@@ -23,6 +23,7 @@ CHAPA_WEBHOOK_SECRET = os.environ.get("CHAPA_WEBHOOK_SECRET")
 
 USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
 PAYMENTS_MSG_MARKER = "D2AI_PAYMENTS_V1"
+SETTINGS_MSG_MARKER = "D2AI_SETTINGS_V1"
 
 app = Flask(__name__)
 CORS(app)
@@ -31,14 +32,15 @@ client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 USERS = {}
 SESSIONS = {}
 PAYMENTS = {}
+SETTINGS = {}
 USERS_MSG_ID = None
 PAYMENTS_MSG_ID = None
+SETTINGS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_trial_days": 14,
     "chapa_test_mode": True 
 }
-SETTINGS = dict(DEFAULT_SETTINGS)
 
 def run(coro):
     try:
@@ -54,7 +56,7 @@ def hash_password(pw): return hashlib.sha256(pw.encode()).hexdigest()
 def make_token(): return secrets.token_urlsafe(48)
 
 def save_to_tg(marker, data, msg_id_holder):
-    global USERS_MSG_ID, PAYMENTS_MSG_ID
+    global USERS_MSG_ID, PAYMENTS_MSG_ID, SETTINGS_MSG_ID
     payload = marker + "\n" + json.dumps(data, ensure_ascii=False)
     try:
         if msg_id_holder == "users":
@@ -65,16 +67,21 @@ def save_to_tg(marker, data, msg_id_holder):
             if PAYMENTS_MSG_ID: run(client.edit_message(CHANNEL, PAYMENTS_MSG_ID, payload))
             else:
                 msg = run(client.send_message(CHANNEL, payload)); PAYMENTS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
+        elif msg_id_holder == "settings":
+            if SETTINGS_MSG_ID: run(client.edit_message(CHANNEL, SETTINGS_MSG_ID, payload))
+            else:
+                msg = run(client.send_message(CHANNEL, payload)); SETTINGS_MSG_ID = msg.id; run(client.pin_message(CHANNEL, msg.id))
     except Exception as e: print(f"⚠️ save {msg_id_holder} failed: {e}")
 
 def load_from_tg(marker, dict_to_fill, id_type):
-    global USERS_MSG_ID, PAYMENTS_MSG_ID
+    global USERS_MSG_ID, PAYMENTS_MSG_ID, SETTINGS_MSG_ID
     try:
         msgs = run(client.get_messages(CHANNEL, limit=200))
         for m in msgs:
             if m.message and m.message.startswith(marker):
                 if id_type == "users": USERS_MSG_ID = m.id
                 elif id_type == "payments": PAYMENTS_MSG_ID = m.id
+                elif id_type == "settings": SETTINGS_MSG_ID = m.id
                 _, _, json_part = m.message.partition("\n")
                 dict_to_fill.clear()
                 dict_to_fill.update(json.loads(json_part))
@@ -83,8 +90,11 @@ def load_from_tg(marker, dict_to_fill, id_type):
 
 def save_users(): save_to_tg(USERS_MSG_MARKER, USERS, "users")
 def save_payments(): save_to_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
+def save_settings(): save_to_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
+
 def load_users(): load_from_tg(USERS_MSG_MARKER, USERS, "users")
 def load_payments(): load_from_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
+def load_settings(): load_from_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
 
 def require_auth(f):
     @wraps(f)
@@ -137,7 +147,7 @@ def register():
         "device_id": device_id, "is_active": True, "recovery_code": secrets.token_hex(4).upper(),
         "payment": {"mode": "trial", "status": "trial", "until": (datetime.utcnow() + timedelta(days=trial_days)).isoformat()},
     }
-    save_users()
+    save_users() # ✅ Saves to Telegram!
     token = make_token()
     SESSIONS[token] = {"phone": phone}
     return jsonify({"token": token})
@@ -178,7 +188,7 @@ def init_payment():
         res_data = res.json()
         if res_data.get("status") == "success":
             PAYMENTS[tx_ref] = {"phone": request.phone, "days": days, "status": "pending"}
-            save_payments()
+            save_payments() # ✅ Saves payment to Telegram!
             return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
         return jsonify({"error": "Failed to init"}), 400
     except Exception as e: return jsonify({"error": str(e)}), 500
@@ -207,10 +217,11 @@ def chapa_webhook():
                     except: pass
                 pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
                 PAYMENTS[tx_ref]["status"] = "completed"
-                save_users(); save_payments()
+                save_users() # ✅ Saves updated user to Telegram!
+                save_payments() # ✅ Saves updated payment to Telegram!
     return jsonify({"status": "ok"}), 200
 
-# --- NEW PROFESSIONAL ADMIN PANEL ---
+# --- ADMIN PANEL ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -326,7 +337,7 @@ def admin_expire_user(phone):
     if not user: return jsonify({"error": "not found"}), 404
     past_date = (datetime.utcnow() - timedelta(days=1)).isoformat()
     user.setdefault("payment", {}).update({"mode": "trial", "status": "expired", "until": past_date})
-    save_users()
+    save_users() # ✅ Saves to Telegram!
     return jsonify({"ok": True})
 
 @app.route("/admin/user/<phone>/add-days", methods=["POST"])
@@ -343,7 +354,7 @@ def admin_add_days(phone):
             if prev > base: base = prev
         except: pass
     pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
-    save_users()
+    save_users() # ✅ Saves to Telegram!
     return jsonify({"ok": True})
 
 @app.route("/admin/user/<phone>/toggle-ban", methods=["POST"])
@@ -352,10 +363,20 @@ def admin_toggle_ban(phone):
     user = USERS.get(phone)
     if not user: return jsonify({"error": "not found"}), 404
     user["is_active"] = not user.get("is_active", True)
-    save_users()
+    save_users() # ✅ Saves to Telegram!
     return jsonify({"ok": True})
 
+# FIXED STARTUP LOGIC
 if __name__ == "__main__":
-    asyncio.run(client.start())
-    load_users(); load_payments()
+    try:
+        print("Starting Telegram Client...")
+        asyncio.run(client.start())  # FIXED: Correctly starts the client
+        print("Loading databases from Telegram...")
+        load_users()
+        load_payments()
+        load_settings()
+        print("✅ Databases loaded successfully.")
+    except Exception as e:
+        print(f"❌ Startup error: {e}")
+
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
