@@ -19,7 +19,8 @@ SESSION          = os.environ["TG_SESSION"]
 CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
-CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY")
+# Ensure these are your LIVE keys in Render Environment Variables
+CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY") 
 CHAPA_WEBHOOK_SECRET = os.environ.get("CHAPA_WEBHOOK_SECRET")
 
 USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
@@ -40,11 +41,10 @@ SETTINGS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_trial_days": 14,
-    "chapa_test_mode": True 
+    "chapa_test_mode": False  # Set to False for Live Mode
 }
 
 def run_async(coro):
-    """Run a coroutine in a new event loop safely."""
     try:
         loop = asyncio.get_running_loop()
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
@@ -181,23 +181,47 @@ def init_payment():
     data = request.get_json() or {}
     amount, days = data.get("amount", 99), data.get("days", 30)
     tx_ref = f"D2AI-{request.phone}-{int(datetime.utcnow().timestamp())}"
+    
     headers = {"Authorization": f"Bearer {CHAPA_SECRET_KEY}", "Content-Type": "application/json"}
+    
+    # Enforce Chapa's strict phone number format (10 digits: 09... or 07...)
+    phone = request.phone
+    if len(phone) == 10 and (phone.startswith('09') or phone.startswith('07')):
+        phone_number = phone
+    else:
+        # Fallback to a safe test number if the user's phone is invalid
+        phone_number = "0911111111" 
+
     payload = {
-        "amount": str(amount), "currency": "ETB", "email": f"{request.phone}@d2ai.com",
-        "first_name": "User", "last_name": "AI", "phone_number": request.phone, "tx_ref": tx_ref,
+        "amount": str(amount), 
+        "currency": "ETB", 
+        "email": f"{request.phone}@d2ai.com",
+        "first_name": "User", 
+        "last_name": "AI", 
+        "phone_number": phone_number,
+        "tx_ref": tx_ref,
         "callback_url": "https://final-k4m9.onrender.com/api/payment/webhook",
         "return_url": "https://final-k4m9.onrender.com/api/subscription/status",
         "customization": {"title": "D² AI Premium", "description": f"{days} Days"}
     }
+    
     try:
         res = requests.post("https://api.chapa.co/v1/transaction/initialize", json=payload, headers=headers)
         res_data = res.json()
+        
         if res_data.get("status") == "success":
             PAYMENTS[tx_ref] = {"phone": request.phone, "days": days, "status": "pending"}
             save_payments()
             return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
-        return jsonify({"error": "Failed to init"}), 400
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        
+        # Log and return the exact Chapa error
+        error_msg = res_data.get("message", "Failed to initialize payment")
+        print(f"❌ Chapa Init Error: {error_msg}")
+        return jsonify({"error": error_msg}), 400
+        
+    except Exception as e: 
+        print(f"❌ Network Error: {str(e)}")
+        return jsonify({"error": "Network error connecting to Chapa"}), 500
 
 @app.route("/api/payment/webhook", methods=["POST"])
 def chapa_webhook():
