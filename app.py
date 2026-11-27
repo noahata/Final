@@ -19,7 +19,6 @@ SESSION          = os.environ["TG_SESSION"]
 CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
-# Ensure these are your LIVE keys in Render Environment Variables
 CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY") 
 CHAPA_WEBHOOK_SECRET = os.environ.get("CHAPA_WEBHOOK_SECRET")
 
@@ -41,7 +40,7 @@ SETTINGS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_trial_days": 14,
-    "chapa_test_mode": False  # Set to False for Live Mode
+    "chapa_test_mode": False
 }
 
 def run_async(coro):
@@ -187,13 +186,13 @@ def init_payment():
     payload = {
         "amount": str(amount), 
         "currency": "ETB", 
-        "email": "hiabhiyu@gmail.com", # ✅ FIXED: Using a valid email
+        "email": "hiabhiyu@gmail.com",
         "first_name": "User", 
         "last_name": "AI", 
         "tx_ref": tx_ref,
         "callback_url": "https://final-k4m9.onrender.com/api/payment/webhook",
         "return_url": "https://final-k4m9.onrender.com/api/subscription/status",
-        "customization": {"title": "D² AI Premium", "description": f"{days} Days"}
+        "customization": {"title": "D2 AI Premium", "description": f"{days} Days"}
     }
     
     try:
