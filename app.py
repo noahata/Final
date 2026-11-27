@@ -187,10 +187,9 @@ def init_payment():
     payload = {
         "amount": str(amount), 
         "currency": "ETB", 
-        "email": f"{request.phone}@d2ai.com",
+        "email": "hiabhiyu@gmail.com", # ✅ FIXED: Using a valid email
         "first_name": "User", 
         "last_name": "AI", 
-        # ❌ REMOVED phone_number — Chapa will ask the user to enter it manually
         "tx_ref": tx_ref,
         "callback_url": "https://final-k4m9.onrender.com/api/payment/webhook",
         "return_url": "https://final-k4m9.onrender.com/api/subscription/status",
@@ -206,7 +205,6 @@ def init_payment():
             save_payments()
             return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
         
-        # Log and return the exact Chapa error safely as a String
         error_msg = str(res_data.get("message", "Failed to initialize payment"))
         print(f"❌ Chapa Init Error: {error_msg}")
         return jsonify({"error": error_msg}), 400
