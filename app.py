@@ -26,7 +26,8 @@ USERS_MSG_MARKER    = "D2AI_USERS_DB_v1"
 PAYMENTS_MSG_MARKER = "D2AI_PAYMENTS_V1"
 SETTINGS_MSG_MARKER = "D2AI_SETTINGS_V1"
 CODES_MSG_MARKER    = "D2AI_CODES_V1"
-REWARDS_MSG_MARKER  = "D2AI_REWARDS_V1" # New
+REWARDS_MSG_MARKER  = "D2AI_REWARDS_V1"
+TICKETS_MSG_MARKER  = "D2AI_TICKETS_V1"
 
 app = Flask(__name__)
 CORS(app)
@@ -37,12 +38,14 @@ SESSIONS = {}
 PAYMENTS = {}
 SETTINGS = {}
 CODES = {}
-REWARDS = {} # New: Stores pending/completed video rewards
+REWARDS = {}
+TICKETS = {}
 USERS_MSG_ID = None
 PAYMENTS_MSG_ID = None
 SETTINGS_MSG_ID = None
 CODES_MSG_ID = None
 REWARDS_MSG_ID = None
+TICKETS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_trial_days": 14,
@@ -63,7 +66,7 @@ def hash_password(pw): return hashlib.sha256(pw.encode()).hexdigest()
 def make_token(): return secrets.token_urlsafe(48)
 
 def save_to_tg(marker, data, msg_id_holder):
-    global USERS_MSG_ID, PAYMENTS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID
+    global USERS_MSG_ID, PAYMENTS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID, TICKETS_MSG_ID
     payload = marker + "\n" + json.dumps(data, ensure_ascii=False)
     try:
         if msg_id_holder == "users":
@@ -86,10 +89,14 @@ def save_to_tg(marker, data, msg_id_holder):
             if REWARDS_MSG_ID: run_async(client.edit_message(CHANNEL, REWARDS_MSG_ID, payload))
             else:
                 msg = run_async(client.send_message(CHANNEL, payload)); REWARDS_MSG_ID = msg.id; run_async(client.pin_message(CHANNEL, msg.id))
+        elif msg_id_holder == "tickets":
+            if TICKETS_MSG_ID: run_async(client.edit_message(CHANNEL, TICKETS_MSG_ID, payload))
+            else:
+                msg = run_async(client.send_message(CHANNEL, payload)); TICKETS_MSG_ID = msg.id; run_async(client.pin_message(CHANNEL, msg.id))
     except Exception as e: print(f"⚠️ save {msg_id_holder} failed: {e}")
 
 def load_from_tg(marker, dict_to_fill, id_type):
-    global USERS_MSG_ID, PAYMENTS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID
+    global USERS_MSG_ID, PAYMENTS_MSG_ID, SETTINGS_MSG_ID, CODES_MSG_ID, REWARDS_MSG_ID, TICKETS_MSG_ID
     try:
         msgs = run_async(client.get_messages(CHANNEL, limit=200))
         for m in msgs:
@@ -99,6 +106,7 @@ def load_from_tg(marker, dict_to_fill, id_type):
                 elif id_type == "settings": SETTINGS_MSG_ID = m.id
                 elif id_type == "codes": CODES_MSG_ID = m.id
                 elif id_type == "rewards": REWARDS_MSG_ID = m.id
+                elif id_type == "tickets": TICKETS_MSG_ID = m.id
                 _, _, json_part = m.message.partition("\n")
                 dict_to_fill.clear()
                 dict_to_fill.update(json.loads(json_part))
@@ -110,12 +118,14 @@ def save_payments(): save_to_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
 def save_settings(): save_to_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
 def save_codes(): save_to_tg(CODES_MSG_MARKER, CODES, "codes")
 def save_rewards(): save_to_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
+def save_tickets(): save_to_tg(TICKETS_MSG_MARKER, TICKETS, "tickets")
 
 def load_users(): load_from_tg(USERS_MSG_MARKER, USERS, "users")
 def load_payments(): load_from_tg(PAYMENTS_MSG_MARKER, PAYMENTS, "payments")
 def load_settings(): load_from_tg(SETTINGS_MSG_MARKER, SETTINGS, "settings")
 def load_codes(): load_from_tg(CODES_MSG_MARKER, CODES, "codes")
 def load_rewards(): load_from_tg(REWARDS_MSG_MARKER, REWARDS, "rewards")
+def load_tickets(): load_from_tg(TICKETS_MSG_MARKER, TICKETS, "tickets")
 
 def require_auth(f):
     @wraps(f)
@@ -137,21 +147,30 @@ def require_admin(f):
         return f(*args, **kwargs)
     return wrapper
 
-def _user_subscription_state(user):
-    pay = user.get("payment", {})
-    mode = pay.get("mode", "free")
-    if mode == "free": return {"status": "free", "locked": False, "days_left": None}
-    until_str = pay.get("until")
-    if not until_str: return {"status": "none", "locked": True, "days_left": 0}
-    try: until = datetime.fromisoformat(until_str)
-    except Exception: return {"status": "none", "locked": True, "days_left": 0}
-    now = datetime.utcnow()
-    if until < now: return {"status": "expired", "locked": True, "days_left": 0, "until": until_str}
-    return {"status": pay.get("status", "active"), "locked": False, "days_left": (until - now).days, "until": until_str}
+@app.route("/api/support/submit", methods=["POST"])
+@require_auth
+def submit_ticket():
+    data = request.get_json() or {}
+    message = data.get("message", "").strip()
+    if not message: return jsonify({"error": "Message cannot be empty"}), 400
+    
+    ticket_id = f"TKT-{secrets.token_hex(3).upper()}"
+    TICKETS[ticket_id] = {
+        "id": ticket_id,
+        "phone": request.phone,
+        "message": message,
+        "reply": None,
+        "status": "pending",
+        "date": datetime.utcnow().isoformat()
+    }
+    save_tickets()
+    return jsonify({"message": "Message sent successfully! Admin will reply soon."})
 
-@app.route("/privacy")
-def privacy_policy():
-    return "Privacy Policy - D2 AI. We collect phone and device ID for security."
+@app.route("/api/support/messages", methods=["GET"])
+@require_auth
+def get_user_tickets():
+    user_tickets = [t for t in TICKETS.values() if t["phone"] == request.phone]
+    return jsonify(user_tickets)
 
 @app.route("/auth/register", methods=["POST"])
 def register():
@@ -187,27 +206,27 @@ def login():
 @app.route("/api/subscription/status")
 @require_auth
 def subscription_status():
-    state = _user_subscription_state(request.user)
-    return jsonify({
-        "subscription": state,
-        "recovery_code": request.user.get("recovery_code", "N/A"),
-        "name": request.user.get("name", "")
-    })
+    pay = request.user.get("payment", {})
+    mode = pay.get("mode", "free")
+    if mode == "free": state = {"status": "free", "locked": False, "days_left": None}
+    else:
+        until_str = pay.get("until")
+        if not until_str: state = {"status": "none", "locked": True, "days_left": 0}
+        else:
+            try: until = datetime.fromisoformat(until_str)
+            except Exception: until = datetime.utcnow()
+            now = datetime.utcnow()
+            if until < now: state = {"status": "expired", "locked": True, "days_left": 0, "until": until_str}
+            else: state = {"status": pay.get("status", "active"), "locked": False, "days_left": (until - now).days, "until": until_str}
+    return jsonify({"subscription": state, "recovery_code": request.user.get("recovery_code", "N/A"), "name": request.user.get("name", "")})
 
 @app.route("/api/subscription/redeem", methods=["POST"])
 @require_auth
 def redeem_code():
-    data = request.get_json() or {}
-    code = data.get("code", "").strip().upper()
-    
-    if code not in CODES:
-        return jsonify({"error": "Invalid activation code"}), 400
-        
-    code_data = CODES[code]
-    if code_data.get("used"):
-        return jsonify({"error": "This code has already been used"}), 400
-        
-    days = code_data["days"]
+    code = (request.get_json() or {}).get("code", "").strip().upper()
+    if code not in CODES or CODES[code].get("used"):
+        return jsonify({"error": "Invalid or used code"}), 400
+    days = CODES[code]["days"]
     pay = request.user.setdefault("payment", {})
     base = datetime.utcnow()
     if pay.get("until"):
@@ -215,35 +234,18 @@ def redeem_code():
             prev = datetime.fromisoformat(pay["until"])
             if prev > base: base = prev
         except: pass
-        
     pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
-    
-    CODES[code]["used"] = True
-    CODES[code]["used_by"] = request.phone
-    CODES[code]["used_at"] = datetime.utcnow().isoformat()
-    
-    save_users()
-    save_codes()
-    
+    CODES[code]["used"] = True; CODES[code]["used_by"] = request.phone; CODES[code]["used_at"] = datetime.utcnow().isoformat()
+    save_users(); save_codes()
     return jsonify({"message": f"Successfully activated {days} days!"})
 
-# --- NEW REWARD SUBMISSION ROUTE ---
 @app.route("/api/reward", methods=["POST"])
 @require_auth
 def submit_reward():
-    data = request.get_json() or {}
-    proof = data.get("proof", "").strip()
-    
-    if not proof or len(proof) < 10:
-        return jsonify({"error": "Please provide a valid video link"}), 400
-        
+    proof = (request.get_json() or {}).get("proof", "").strip()
+    if not proof: return jsonify({"error": "Please provide a valid link"}), 400
     reward_id = f"RWD-{secrets.token_hex(3).upper()}"
-    REWARDS[reward_id] = {
-        "phone": request.phone,
-        "proof": proof,
-        "status": "pending",
-        "date": datetime.utcnow().isoformat()
-    }
+    REWARDS[reward_id] = {"phone": request.phone, "proof": proof, "status": "pending", "date": datetime.utcnow().isoformat()}
     save_rewards()
     return jsonify({"message": "Reward submitted! Admin will review it shortly."})
 
@@ -253,35 +255,23 @@ def init_payment():
     data = request.get_json() or {}
     amount, days = data.get("amount", 99), data.get("days", 30)
     tx_ref = f"D2AI-{request.phone}-{int(datetime.utcnow().timestamp())}"
-    
     headers = {"Authorization": f"Bearer {CHAPA_SECRET_KEY}", "Content-Type": "application/json"}
-    
     payload = {
-        "amount": str(amount), 
-        "currency": "ETB", 
-        "email": "hiabhiyu@gmail.com",
-        "first_name": "User", 
-        "last_name": "AI", 
-        "tx_ref": tx_ref,
+        "amount": str(amount), "currency": "ETB", "email": "hiabhiyu@gmail.com",
+        "first_name": "User", "last_name": "AI", "tx_ref": tx_ref,
         "callback_url": "https://final-k4m9.onrender.com/api/payment/webhook",
         "return_url": "https://final-k4m9.onrender.com/api/subscription/status",
         "customization": {"title": "D2 AI Premium", "description": f"{days} Days"}
     }
-    
     try:
         res = requests.post("https://api.chapa.co/v1/transaction/initialize", json=payload, headers=headers)
         res_data = res.json()
-        
         if res_data.get("status") == "success":
             PAYMENTS[tx_ref] = {"phone": request.phone, "amount": amount, "days": days, "status": "pending", "date": datetime.utcnow().isoformat()}
             save_payments()
             return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
-        
-        error_msg = str(res_data.get("message", "Failed to initialize payment"))
-        return jsonify({"error": error_msg}), 400
-        
-    except Exception as e: 
-        return jsonify({"error": "Network error connecting to Chapa"}), 500
+        return jsonify({"error": str(res_data.get("message", "Failed"))}), 400
+    except Exception as e: return jsonify({"error": "Network error"}), 500
 
 @app.route("/api/payment/webhook", methods=["POST"])
 def chapa_webhook():
@@ -293,10 +283,9 @@ def chapa_webhook():
     data = request.get_json()
     if data.get("status") == "success":
         tx_ref = data.get("tx_ref")
-        payment_info = PAYMENTS.get(tx_ref)
-        if payment_info and payment_info.get("status") == "pending":
-            phone, days = payment_info["phone"], payment_info["days"]
-            user = USERS.get(phone)
+        p = PAYMENTS.get(tx_ref)
+        if p and p.get("status") == "pending":
+            user = USERS.get(p["phone"])
             if user:
                 pay = user.setdefault("payment", {})
                 base = datetime.utcnow()
@@ -305,16 +294,12 @@ def chapa_webhook():
                         prev = datetime.fromisoformat(pay["until"])
                         if prev > base: base = prev
                     except: pass
-                pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
-                
-                PAYMENTS[tx_ref]["status"] = "completed"
-                PAYMENTS[tx_ref]["completed_date"] = datetime.utcnow().isoformat()
-                
-                save_users()
-                save_payments()
+                pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=p["days"])).isoformat()})
+                PAYMENTS[tx_ref]["status"] = "completed"; PAYMENTS[tx_ref]["completed_date"] = datetime.utcnow().isoformat()
+                save_users(); save_payments()
     return jsonify({"status": "ok"}), 200
 
-# --- ADMIN PANEL ---
+# --- ADMIN PANEL HTML ---
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -326,7 +311,13 @@ ADMIN_HTML = """
   body { margin: 0; background: #0F172A; color: white; }
   header { background: #1E293B; padding: 20px; text-align: center; border-bottom: 1px solid #334155; }
   h1 { margin: 0; color: #3B82F6; font-size: 24px; }
-  .container { max-width: 1000px; margin: 20px auto; padding: 0 16px; }
+  .container { max-width: 1100px; margin: 20px auto; padding: 0 16px; }
+  .nav-tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 10px; }
+  .nav-btn { background: transparent; color: #94A3B8; border: 1px solid #334155; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 16px; transition: 0.2s; }
+  .nav-btn.active { background: #3B82F6; color: white; border-color: #3B82F6; }
+  .nav-btn:hover:not(.active) { background: #1E293B; color: white; }
+  .page { display: none; }
+  .page.active { display: block; }
   .card { background: #1E293B; padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; }
   h2 { margin-top: 0; color: #3B82F6; font-size: 18px; }
   input, select { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0F172A; color: white; margin-bottom: 12px; }
@@ -334,13 +325,12 @@ ADMIN_HTML = """
   button:hover { background: #2563EB; }
   button.danger { background: #EF4444; }
   button.success { background: #10B981; }
-  .user-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; border-bottom: 1px solid #334155; }
+  .user-row, .payment-row, .reward-row, .ticket-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; border-bottom: 1px solid #334155; }
   .user-info { display: flex; flex-direction: column; gap: 5px; }
   .actions { display: flex; gap: 10px; }
-  .payment-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 15px; border-bottom: 1px solid #334155; font-size: 14px; }
   .code-box { display: flex; justify-content: space-between; align-items: center; background: #0F172A; padding: 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #334155; }
   .code-text { font-family: monospace; font-size: 18px; font-weight: bold; color: #10B981; letter-spacing: 2px; }
-  .reward-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; border-bottom: 1px solid #334155; }
+  .ticket-reply-box { width: 100%; height: 60px; background: #0F172A; border: 1px solid #334155; color: white; padding: 8px; border-radius: 8px; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -353,42 +343,58 @@ ADMIN_HTML = """
   </div>
 
   <div id="panel" style="display:none;">
-    
-    <!-- REWARD REQUESTS -->
-    <div class="card">
-      <h2>🎁 Reward Requests (Video Submissions)</h2>
-      <p style="color:#94A3B8; font-size:14px; margin-bottom:10px;">Review user videos. Approve to grant 30 days free.</p>
-      <div id="rewardsList">Loading...</div>
+    <div class="nav-tabs">
+      <button class="nav-btn active" onclick="switchPage('messages')">📩 Messages</button>
+      <button class="nav-btn" onclick="switchPage('rewards')">🎁 Rewards</button>
+      <button class="nav-btn" onclick="switchPage('codes')">🎟️ Codes</button>
+      <button class="nav-btn" onclick="switchPage('payments')">💰 Payments</button>
+      <button class="nav-btn" onclick="switchPage('users')">👥 Users</button>
     </div>
 
-    <!-- GENERATE CODES -->
-    <div class="card">
-      <h2>🎟️ Generate Activation Code</h2>
-      <p style="color:#94A3B8; font-size:14px; margin-bottom:10px;">Generate a manual code for users to activate without Chapa.</p>
-      <div style="display:flex; gap:10px; margin-bottom: 15px;">
-        <select id="codeDays" style="flex:1;">
-          <option value="30">30 Days (Monthly)</option>
-          <option value="180">180 Days (6 Months)</option>
-          <option value="365">365 Days (Yearly)</option>
-          <option value="7">7 Days (Trial)</option>
-        </select>
-        <button onclick="generateCode()" class="success" style="flex:1;">Generate Code</button>
+    <div id="page-messages" class="page active">
+      <div class="card">
+        <h2>📩 Support Tickets</h2>
+        <p style="color:#94A3B8; font-size:14px; margin-bottom:10px;">Reply to user messages. They will see your reply in the app.</p>
+        <div id="ticketsList">Loading...</div>
       </div>
-      <div id="codesList"></div>
     </div>
 
-    <!-- SUCCESSFUL PAYMENTS -->
-    <div class="card">
-      <h2>💰 Successful Payments</h2>
-      <p style="color:#94A3B8; font-size:14px; margin-bottom:10px;">Recent completed transactions via Chapa.</p>
-      <div id="paymentsList">Loading...</div>
+    <div id="page-rewards" class="page">
+      <div class="card">
+        <h2>🎁 Reward Requests</h2>
+        <p style="color:#94A3B8; font-size:14px; margin-bottom:10px;">Review user videos. Approve to grant 30 days free.</p>
+        <div id="rewardsList">Loading...</div>
+      </div>
     </div>
 
-    <!-- USERS -->
-    <div class="card">
-      <h2>👥 User Management & Test Override</h2>
-      <p style="color:#94A3B8; font-size:14px; margin-bottom:20px;">Manage subscriptions, test payments, or ban users.</p>
-      <div id="usersList">Loading...</div>
+    <div id="page-codes" class="page">
+      <div class="card">
+        <h2>🎟️ Generate Activation Code</h2>
+        <div style="display:flex; gap:10px; margin-bottom: 15px;">
+          <select id="codeDays" style="flex:1;">
+            <option value="30">30 Days</option>
+            <option value="180">180 Days</option>
+            <option value="365">365 Days</option>
+            <option value="7">7 Days</option>
+          </select>
+          <button onclick="generateCode()" class="success" style="flex:1;">Generate Code</button>
+        </div>
+        <div id="codesList">Loading...</div>
+      </div>
+    </div>
+
+    <div id="page-payments" class="page">
+      <div class="card">
+        <h2>💰 Successful Payments</h2>
+        <div id="paymentsList">Loading...</div>
+      </div>
+    </div>
+
+    <div id="page-users" class="page">
+      <div class="card">
+        <h2>👥 User Management</h2>
+        <div id="usersList">Loading...</div>
+      </div>
     </div>
   </div>
 </div>
@@ -397,158 +403,138 @@ ADMIN_HTML = """
 const $ = id => document.getElementById(id);
 const key = () => $('adminKey').value;
 
+function switchPage(pageId) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  $('page-' + pageId).classList.add('active');
+  event.target.classList.add('active');
+  if(pageId === 'messages') loadTickets();
+  if(pageId === 'rewards') loadRewards();
+  if(pageId === 'codes') loadCodes();
+  if(pageId === 'payments') loadPayments();
+  if(pageId === 'users') loadUsers();
+}
+
 async function loadPanel() {
   if (!key()) return alert('Enter key');
   const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
   if (r.status === 401) return alert('Wrong key');
   $('panel').style.display = 'block';
-  loadRewards();
-  loadCodes();
-  loadPayments();
-  loadUsers();
+  switchPage('messages');
+}
+
+async function loadTickets() {
+  $('ticketsList').innerHTML = 'Loading...';
+  const r = await fetch('/admin/tickets', { headers: { 'X-Admin-Key': key() } });
+  const tickets = await r.json();
+  let html = '';
+  const sorted = Object.values(tickets).sort((a, b) => new Date(b.date) - new Date(a.date));
+  if (sorted.length === 0) html = '<div style="color:#94A3B8;">No messages yet.</div>';
+  else {
+    sorted.forEach(t => {
+      html += `
+        <div class="ticket-row" style="flex-direction:column; align-items:flex-start; border-bottom:1px solid #334155; padding-bottom:15px;">
+          <div style="display:flex; justify-content:space-between; width:100%; margin-bottom:8px;">
+            <b>${t.phone}</b>
+            <span style="color:#94A3B8; font-size:12px;">${new Date(t.date).toLocaleString()}</span>
+          </div>
+          <div style="background:#0F172A; padding:10px; border-radius:8px; width:100%; margin-bottom:10px;">${t.message}</div>
+          ${t.reply ? `<div style="color:#10B981; margin-bottom:10px; width:100%;">✅ Your reply: ${t.reply}</div>` : `
+            <textarea id="reply-${t.id}" class="ticket-reply-box" placeholder="Type your reply here..."></textarea>
+            <button onclick="sendReply('${t.id}')" style="margin-top:8px;">Send Reply</button>
+          `}
+        </div>`;
+    });
+  }
+  $('ticketsList').innerHTML = html;
+}
+
+async function sendReply(id) {
+  const reply = $(`reply-${id}`).value.trim();
+  if (!reply) return alert('Reply cannot be empty');
+  await fetch('/admin/ticket/' + id + '/reply', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ reply: reply }) });
+  loadTickets();
 }
 
 async function loadRewards() {
+  $('rewardsList').innerHTML = 'Loading...';
   const r = await fetch('/admin/rewards', { headers: { 'X-Admin-Key': key() } });
   const rewards = await r.json();
   let html = '';
-  
   const pending = Object.entries(rewards).filter(([id, rw]) => rw.status === 'pending');
-  
-  if (pending.length === 0) {
-    html = '<div style="color:#94A3B8; font-size:14px;">No pending reward requests.</div>';
-  } else {
+  if (pending.length === 0) html = '<div style="color:#94A3B8;">No pending reward requests.</div>';
+  else {
     pending.forEach(([id, rw]) => {
-      html += `
-        <div class="reward-row">
-          <div class="user-info">
-            <b>${rw.phone}</b>
-            <a href="${rw.proof}" target="_blank" style="color:#3B82F6; font-size:13px;">${rw.proof}</a>
-          </div>
-          <div class="actions">
-            <button class="success" onclick="approveReward('${id}', '${rw.phone}')">Approve (30 Days)</button>
-            <button class="danger" onclick="rejectReward('${id}')">Reject</button>
-          </div>
-        </div>`;
+      html += `<div class="reward-row"><div><b>${rw.phone}</b><br><a href="${rw.proof}" target="_blank" style="color:#3B82F6; font-size:13px;">${rw.proof}</a></div><div class="actions"><button class="success" onclick="approveReward('${id}', '${rw.phone}')">Approve</button><button class="danger" onclick="rejectReward('${id}')">Reject</button></div></div>`;
     });
   }
   $('rewardsList').innerHTML = html;
 }
 
 async function approveReward(id, phone) {
-  if(!confirm('Approve this video and give 30 days free?')) return;
-  await fetch('/admin/reward/' + id + '/approve', { 
-    method: 'POST', 
-    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, 
-    body: JSON.stringify({ phone: phone }) 
-  });
-  loadRewards();
-  loadUsers();
+  if(!confirm('Approve and give 30 days free?')) return;
+  await fetch('/admin/reward/' + id + '/approve', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: phone }) });
+  loadRewards(); loadUsers();
 }
-
 async function rejectReward(id) {
-  if(!confirm('Reject this request?')) return;
   await fetch('/admin/reward/' + id + '/reject', { method: 'POST', headers: { 'X-Admin-Key': key() } });
   loadRewards();
 }
 
 async function loadCodes() {
+  $('codesList').innerHTML = 'Loading...';
   const r = await fetch('/admin/codes', { headers: { 'X-Admin-Key': key() } });
   const codes = await r.json();
   let html = '';
-  
-  const sortedCodes = Object.entries(codes).sort((a, b) => new Date(b[1].created_at) - new Date(a[1].created_at));
-  
-  if (sortedCodes.length === 0) {
-    html = '<div style="color:#94A3B8; font-size:14px;">No codes generated yet.</div>';
-  } else {
-    sortedCodes.slice(0, 10).forEach(([code, data]) => {
-      const isUsed = data.used;
-      const statusText = isUsed ? `<span style="color:#EF4444; font-size:12px;">(Used by ${data.used_by})</span>` : `<span style="color:#F59E0B; font-size:12px;">(Unused)</span>`;
-      html += `
-        <div class="code-box">
-          <div>
-            <span class="code-text">${code}</span> 
-            <span style="color:#94A3B8; font-size:12px; margin-left:10px;">${data.days} Days</span>
-            ${statusText}
-          </div>
-          <button onclick="navigator.clipboard.writeText('${code}'); alert('Code copied!')" style="padding:6px 12px; font-size:12px;">Copy</button>
-        </div>`;
+  const sorted = Object.entries(codes).sort((a, b) => new Date(b[1].created_at) - new Date(a[1].created_at));
+  if (sorted.length === 0) html = '<div style="color:#94A3B8;">No codes generated yet.</div>';
+  else {
+    sorted.slice(0, 10).forEach(([code, data]) => {
+      html += `<div class="code-box"><div><span class="code-text">${code}</span> <span style="color:#94A3B8; font-size:12px; margin-left:10px;">${data.days} Days</span> ${data.used ? `<span style="color:#EF4444; font-size:12px;">(Used)</span>` : `<span style="color:#F59E0B; font-size:12px;">(Unused)</span>`}</div><button onclick="navigator.clipboard.writeText('${code}'); alert('Code copied!')" style="padding:6px 12px; font-size:12px;">Copy</button></div>`;
     });
   }
   $('codesList').innerHTML = html;
 }
-
 async function generateCode() {
   const days = $('codeDays').value;
-  await fetch('/admin/generate-code', { 
-    method: 'POST', 
-    headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, 
-    body: JSON.stringify({ days: parseInt(days) }) 
-  });
+  await fetch('/admin/generate-code', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ days: parseInt(days) }) });
   loadCodes();
 }
 
 async function loadPayments() {
+  $('paymentsList').innerHTML = 'Loading...';
   const r = await fetch('/admin/payments', { headers: { 'X-Admin-Key': key() } });
   const payments = await r.json();
   let html = '';
-  
-  const sortedPayments = Object.entries(payments)
-    .filter(([ref, p]) => p.status === 'completed')
-    .sort((a, b) => new Date(b[1].completed_date) - new Date(a[1].completed_date));
-
-  if (sortedPayments.length === 0) {
-      html = '<div style="color:#94A3B8; font-size:14px;">No completed payments yet.</div>';
-  } else {
-      sortedPayments.forEach(([ref, p]) => {
-        const dateStr = new Date(p.completed_date).toLocaleString();
-        html += `
-          <div class="payment-row">
-            <div><b>${p.phone}</b> paid <b style="color:#10B981">${p.amount} ETB</b> for ${p.days} days</div>
-            <div style="color:#94A3B8; font-size:12px;">${dateStr}</div>
-          </div>`;
-      });
+  const sorted = Object.entries(payments).filter(([ref, p]) => p.status === 'completed').sort((a, b) => new Date(b[1].completed_date) - new Date(a[1].completed_date));
+  if (sorted.length === 0) html = '<div style="color:#94A3B8;">No completed payments yet.</div>';
+  else {
+    sorted.forEach(([ref, p]) => {
+      html += `<div class="payment-row"><div><b>${p.phone}</b> paid <b style="color:#10B981">${p.amount} ETB</b> for ${p.days} days</div><div style="color:#94A3B8; font-size:12px;">${new Date(p.completed_date).toLocaleString()}</div></div>`;
+    });
   }
   $('paymentsList').innerHTML = html;
 }
 
 async function loadUsers() {
+  $('usersList').innerHTML = 'Loading...';
   const r = await fetch('/admin/users', { headers: { 'X-Admin-Key': key() } });
   const users = await r.json();
   let html = '';
   users.forEach(u => {
-    const isPaid = u.payment?.mode === 'paid';
-    const statusBadge = isPaid ? '<span style="color:#10B981">⭐ Paid</span>' : '<span style="color:#F59E0B">🕒 Trial</span>';
-    const statusBan = u.is_active ? '' : ' <span style="color:#EF4444">(Banned)</span>';
-    
-    html += `
-      <div class="user-row">
-        <div class="user-info">
-          <b>${u.phone}</b> ${statusBadge} ${statusBan}
-          <span style="color:#94A3B8; font-size:12px;">Name: ${u.name || 'N/A'} | Device: ${u.device_id}</span>
-        </div>
-        <div class="actions">
-          <button class="danger" onclick="setExpired('${u.phone}')">Expire Now</button>
-          <button class="success" onclick="addDays('${u.phone}', 30)">+30 Days</button>
-          <button style="background:#475569" onclick="toggleBan('${u.phone}')">${u.is_active ? 'Ban' : 'Unban'}</button>
-        </div>
-      </div>`;
+    html += `<div class="user-row"><div class="user-info"><b>${u.phone}</b> ${u.payment?.mode === 'paid' ? '⭐ Paid' : '🕒 Trial'} ${u.is_active ? '' : '(Banned)'}<span style="color:#94A3B8; font-size:12px;">Name: ${u.name || 'N/A'} | Device: ${u.device_id}</span></div><div class="actions"><button class="danger" onclick="setExpired('${u.phone}')">Expire</button><button class="success" onclick="addDays('${u.phone}', 30)">+30 Days</button><button style="background:#475569" onclick="toggleBan('${u.phone}')">${u.is_active ? 'Ban' : 'Unban'}</button></div></div>`;
   });
   $('usersList').innerHTML = html;
 }
-
 async function setExpired(phone) {
-  if(!confirm('Force expire this user to test payment?')) return;
+  if(!confirm('Force expire?')) return;
   await fetch('/admin/user/' + phone + '/expire', { method: 'POST', headers: { 'X-Admin-Key': key() } });
   loadUsers();
 }
-
 async function addDays(phone, days) {
   await fetch('/admin/user/' + phone + '/add-days', { method: 'POST', headers: { 'X-Admin-Key': key(), 'Content-Type': 'application/json' }, body: JSON.stringify({ days: days }) });
   loadUsers();
 }
-
 async function toggleBan(phone) {
   await fetch('/admin/user/' + phone + '/toggle-ban', { method: 'POST', headers: { 'X-Admin-Key': key() } });
   loadUsers();
@@ -578,6 +564,20 @@ def admin_codes(): return jsonify(CODES)
 @require_admin
 def admin_rewards(): return jsonify(REWARDS)
 
+@app.route("/admin/tickets")
+@require_admin
+def admin_tickets(): return jsonify(TICKETS)
+
+@app.route("/admin/ticket/<ticket_id>/reply", methods=["POST"])
+@require_admin
+def admin_reply_ticket(ticket_id):
+    if ticket_id not in TICKETS: return jsonify({"error": "not found"}), 404
+    reply = (request.get_json() or {}).get("reply", "").strip()
+    TICKETS[ticket_id]["reply"] = reply
+    TICKETS[ticket_id]["status"] = "replied"
+    save_tickets()
+    return jsonify({"ok": True})
+
 @app.route("/admin/generate-code", methods=["POST"])
 @require_admin
 def admin_generate_code():
@@ -594,7 +594,6 @@ def admin_approve_reward(reward_id):
     phone = REWARDS[reward_id]["phone"]
     user = USERS.get(phone)
     if not user: return jsonify({"error": "user not found"}), 404
-    
     pay = user.setdefault("payment", {})
     base = datetime.utcnow()
     if pay.get("until"):
@@ -602,14 +601,9 @@ def admin_approve_reward(reward_id):
             prev = datetime.fromisoformat(pay["until"])
             if prev > base: base = prev
         except: pass
-        
     pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=30)).isoformat()})
-    
-    REWARDS[reward_id]["status"] = "approved"
-    REWARDS[reward_id]["approved_at"] = datetime.utcnow().isoformat()
-    
-    save_users()
-    save_rewards()
+    REWARDS[reward_id]["status"] = "approved"; REWARDS[reward_id]["approved_at"] = datetime.utcnow().isoformat()
+    save_users(); save_rewards()
     return jsonify({"ok": True})
 
 @app.route("/admin/reward/<reward_id>/reject", methods=["POST"])
@@ -625,8 +619,8 @@ def admin_reject_reward(reward_id):
 def admin_expire_user(phone):
     user = USERS.get(phone)
     if not user: return jsonify({"error": "not found"}), 404
-    past_date = (datetime.utcnow() - timedelta(days=1)).isoformat()
-    user.setdefault("payment", {}).update({"mode": "trial", "status": "expired", "until": past_date})
+    past = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    user.setdefault("payment", {}).update({"mode": "trial", "status": "expired", "until": past})
     save_users()
     return jsonify({"ok": True})
 
@@ -656,28 +650,21 @@ def admin_toggle_ban(phone):
     save_users()
     return jsonify({"ok": True})
 
-# --- STARTUP LOGIC ---
 def start_telegram_client():
     try:
         print("Starting Telegram Client...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(client.start())
-        print("Loading databases from Telegram...")
-        load_users()
-        load_payments()
-        load_settings()
-        load_codes()
-        load_rewards() # Load rewards on startup
+        print("Loading databases...")
+        load_users(); load_payments(); load_settings(); load_codes(); load_rewards(); load_tickets()
         print("✅ Databases loaded successfully.")
         loop.run_forever()
     except Exception as e:
         print(f"❌ Startup error: {e}")
 
 if __name__ == "__main__":
-    telegram_thread = threading.Thread(target=start_telegram_client, daemon=True)
-    telegram_thread.start()
-
+    threading.Thread(target=start_telegram_client, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     print(f"Starting Flask on port {port}...")
     app.run(host="0.0.0.0", port=port)
