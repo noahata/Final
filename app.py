@@ -169,7 +169,10 @@ def submit_ticket():
 @app.route("/api/support/messages", methods=["GET"])
 @require_auth
 def get_user_tickets():
+    # Returns only the tickets belonging to the logged-in user
     user_tickets = [t for t in TICKETS.values() if t["phone"] == request.phone]
+    # Sort by date descending
+    user_tickets.sort(key=lambda x: x['date'], reverse=True)
     return jsonify(user_tickets)
 
 @app.route("/auth/register", methods=["POST"])
