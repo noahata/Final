@@ -19,6 +19,7 @@ SESSION          = os.environ["TG_SESSION"]
 CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
+# Ensure these are your LIVE keys in Render Environment Variables
 CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY") 
 CHAPA_WEBHOOK_SECRET = os.environ.get("CHAPA_WEBHOOK_SECRET")
 
@@ -49,7 +50,7 @@ TICKETS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_trial_days": 14,
-    "chapa_test_mode": False
+    "chapa_test_mode": False  # Set to False for Live Mode
 }
 
 def run_async(coro):
@@ -169,9 +170,7 @@ def submit_ticket():
 @app.route("/api/support/messages", methods=["GET"])
 @require_auth
 def get_user_tickets():
-    # Returns only the tickets belonging to the logged-in user
     user_tickets = [t for t in TICKETS.values() if t["phone"] == request.phone]
-    # Sort by date descending
     user_tickets.sort(key=lambda x: x['date'], reverse=True)
     return jsonify(user_tickets)
 
@@ -258,23 +257,38 @@ def init_payment():
     data = request.get_json() or {}
     amount, days = data.get("amount", 99), data.get("days", 30)
     tx_ref = f"D2AI-{request.phone}-{int(datetime.utcnow().timestamp())}"
+    
     headers = {"Authorization": f"Bearer {CHAPA_SECRET_KEY}", "Content-Type": "application/json"}
+    
     payload = {
-        "amount": str(amount), "currency": "ETB", "email": "hiabhiyu@gmail.com",
-        "first_name": "User", "last_name": "AI", "tx_ref": tx_ref,
+        "amount": str(amount), 
+        "currency": "ETB", 
+        "email": "hiabhiyu@gmail.com", # ✅ Valid email for Live Mode
+        "first_name": "User", 
+        "last_name": "AI", 
+        "tx_ref": tx_ref,
         "callback_url": "https://final-k4m9.onrender.com/api/payment/webhook",
         "return_url": "https://final-k4m9.onrender.com/api/subscription/status",
         "customization": {"title": "D2 AI Premium", "description": f"{days} Days"}
     }
+    
     try:
+        # ✅ Live URL
         res = requests.post("https://api.chapa.co/v1/transaction/initialize", json=payload, headers=headers)
         res_data = res.json()
+        
         if res_data.get("status") == "success":
             PAYMENTS[tx_ref] = {"phone": request.phone, "amount": amount, "days": days, "status": "pending", "date": datetime.utcnow().isoformat()}
             save_payments()
             return jsonify({"checkout_url": res_data["data"]["checkout_url"]})
-        return jsonify({"error": str(res_data.get("message", "Failed"))}), 400
-    except Exception as e: return jsonify({"error": "Network error"}), 500
+        
+        error_msg = str(res_data.get("message", "Failed to initialize payment"))
+        print(f"❌ Chapa Init Error: {error_msg}")
+        return jsonify({"error": error_msg}), 400
+        
+    except Exception as e: 
+        print(f"❌ Network Error: {str(e)}")
+        return jsonify({"error": "Network error connecting to Chapa"}), 500
 
 @app.route("/api/payment/webhook", methods=["POST"])
 def chapa_webhook():
@@ -286,9 +300,10 @@ def chapa_webhook():
     data = request.get_json()
     if data.get("status") == "success":
         tx_ref = data.get("tx_ref")
-        p = PAYMENTS.get(tx_ref)
-        if p and p.get("status") == "pending":
-            user = USERS.get(p["phone"])
+        payment_info = PAYMENTS.get(tx_ref)
+        if payment_info and payment_info.get("status") == "pending":
+            phone, days = payment_info["phone"], payment_info["days"]
+            user = USERS.get(phone)
             if user:
                 pay = user.setdefault("payment", {})
                 base = datetime.utcnow()
@@ -297,9 +312,11 @@ def chapa_webhook():
                         prev = datetime.fromisoformat(pay["until"])
                         if prev > base: base = prev
                     except: pass
-                pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=p["days"])).isoformat()})
-                PAYMENTS[tx_ref]["status"] = "completed"; PAYMENTS[tx_ref]["completed_date"] = datetime.utcnow().isoformat()
-                save_users(); save_payments()
+                pay.update({"mode": "paid", "status": "active", "until": (base + timedelta(days=days)).isoformat()})
+                PAYMENTS[tx_ref]["status"] = "completed"
+                PAYMENTS[tx_ref]["completed_date"] = datetime.utcnow().isoformat()
+                save_users()
+                save_payments()
     return jsonify({"status": "ok"}), 200
 
 # --- ADMIN PANEL HTML ---
@@ -662,7 +679,7 @@ def start_telegram_client():
         print("Loading databases...")
         load_users(); load_payments(); load_settings(); load_codes(); load_rewards(); load_tickets()
         print("✅ Databases loaded successfully.")
-        loop.run_forever()
+        loop.forever()
     except Exception as e:
         print(f"❌ Startup error: {e}")
 
