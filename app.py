@@ -19,7 +19,6 @@ SESSION          = os.environ["TG_SESSION"]
 CHANNEL          = int(os.environ["TG_CHANNEL"])
 ADMIN_KEY        = os.environ["ADMIN_KEY"]
 
-# Ensure these are your LIVE keys in Render Environment Variables
 CHAPA_SECRET_KEY = os.environ.get("CHAPA_SECRET_KEY") 
 CHAPA_WEBHOOK_SECRET = os.environ.get("CHAPA_WEBHOOK_SECRET")
 
@@ -50,7 +49,7 @@ TICKETS_MSG_ID = None
 
 DEFAULT_SETTINGS = {
     "default_trial_days": 14,
-    "chapa_test_mode": False  # Set to False for Live Mode
+    "chapa_test_mode": False
 }
 
 def run_async(coro):
@@ -273,7 +272,6 @@ def init_payment():
     }
     
     try:
-        # ✅ Live URL
         res = requests.post("https://api.chapa.co/v1/transaction/initialize", json=payload, headers=headers)
         res_data = res.json()
         
@@ -679,7 +677,7 @@ def start_telegram_client():
         print("Loading databases...")
         load_users(); load_payments(); load_settings(); load_codes(); load_rewards(); load_tickets()
         print("✅ Databases loaded successfully.")
-        loop.forever()
+        loop.run_forever()
     except Exception as e:
         print(f"❌ Startup error: {e}")
 
